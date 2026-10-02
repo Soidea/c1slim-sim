@@ -21,6 +21,48 @@ param(
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
 
+# Self-guard: this file must stay pure ASCII.
+#
+# PowerShell 5.1 (the version shipped with Windows) reads a BOM-less file as
+# ANSI, so a single non-ASCII byte anywhere below can corrupt quote pairing and
+# break parsing of everything after it. The failure is badly disguised: it shows
+# up as a function returning nothing, -split returning null, or a bogus "switch
+# clause missing a statement block" far away from the real cause. Guarding here
+# turns a long debugging session into one clear message.
+#
+# Only the offending line numbers are printed, and the file is read as bytes so
+# the report itself cannot be mangled by the same decoding problem.
+#
+# Known limit: `param(...)` must be the first statement, so this guard cannot
+# run before it. Non-ASCII inside the param block or the header comments still
+# yields a bare "missing )" parser error before this guard is reached. That is
+# still a loud failure, just a less helpful message -- keep this file ASCII.
+$nonAscii = [System.IO.File]::ReadAllBytes($MyInvocation.MyCommand.Path)
+$badLines = @()
+$lineNo = 0
+$start = 0
+for ($i = 0; $i -le $nonAscii.Length; $i++) {
+    $atEnd = ($i -eq $nonAscii.Length)
+    if ($atEnd -or $nonAscii[$i] -eq 10) {
+        $lineNo++
+        $end = if ($atEnd) { $i } else { $i - 1 }
+        for ($j = $start; $j -le $end; $j++) {
+            if ($nonAscii[$j] -gt 127) {
+                $badLines += $lineNo
+                break
+            }
+        }
+        $start = $i + 1
+    }
+}
+if ($badLines.Count -gt 0) {
+    Write-Host 'build.ps1 must stay pure ASCII. Non-ASCII bytes on line(s):' -ForegroundColor Red
+    Write-Host ($badLines -join ', ') -ForegroundColor Red
+    Write-Host 'PowerShell 5.1 reads BOM-less files as ANSI and will mis-decode them,' -ForegroundColor Red
+    Write-Host 'which silently breaks quote pairing. Write comments in English here.' -ForegroundColor Red
+    throw 'build.ps1 contains non-ASCII characters'
+}
+
 # Go may not be on PATH; prefer the known install location.
 $go = 'D:\DevProgramsSDK\go1.26\bin\go.exe'
 if (-not (Test-Path $go)) { $go = 'go' }
