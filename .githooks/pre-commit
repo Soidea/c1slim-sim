@@ -1,0 +1,76 @@
+#!/bin/sh
+# Pre-commit guard.
+#
+# Checks the files staged for this commit only, so pre-existing problems in the
+# working tree never block unrelated work. Installed via core.hooksPath, so it
+# travels with the repository (unlike .git/hooks).
+#
+# Checks:
+#   1. build.ps1 stays pure ASCII (byte-level, see the comment in build.ps1).
+#   2. No .exe/.dll or other build output gets committed.
+#   3. Go files are gofmt-clean.
+#
+# Bypass with:  git commit -n
+set -u
+
+fail=0
+note() { printf '  %s\n' "$1"; }
+bad() { printf 'pre-commit: %s\n' "$1" >&2; fail=1; }
+
+# Empty commit (no staged files) or a merge: nothing to inspect.
+staged=$(git diff --cached --name-only --diff-filter=ACMR)
+[ -z "$staged" ] && exit 0
+
+# --- 1. build.ps1 must be pure ASCII ----------------------------------------
+# PowerShell 5.1 reads BOM-less files as ANSI, so a single non-ASCII byte can
+# break quote pairing and make the whole script unparseable. The failure looks
+# unrelated (a function returning nothing, -split returning null, a bogus
+# "switch clause missing a statement block" far away), which makes it very
+# expensive to debug. Catch it here instead.
+for f in $staged; do
+    case "$f" in
+    *.ps1)
+        # LC_ALL=C makes grep treat bytes literally instead of trying UTF-8.
+        lines=$(LC_ALL=C grep -n '[^ -~	]' "$f" 2>/dev/null | cut -d: -f1 | tr '\n' ' ')
+        if [ -n "$lines" ]; then
+            bad "$f contains non-ASCII characters on line(s): $lines"
+            note "Write comments in English there; PowerShell 5.1 mis-decodes non-ASCII."
+        fi
+        ;;
+    esac
+done
+
+# --- 2. build output must not be committed ----------------------------------
+for f in $staged; do
+    case "$f" in
+    *.exe|*.dll|*.o|*.a|*.so)
+        bad "$f looks like build output and should not be committed"
+        ;;
+    build/*)
+        bad "$f is under build/ (build output)"
+        ;;
+    esac
+done
+
+# --- 3. gofmt ----------------------------------------------------------------
+gofmt_bin=$(command -v gofmt 2>/dev/null)
+[ -z "$gofmt_bin" ] && gofmt_bin="/d/DevProgramsSDK/go1.26/bin/gofmt"
+if [ -x "$gofmt_bin" ]; then
+    gofiles=$(printf '%s\n' $staged | grep '\.go$')
+    if [ -n "$gofiles" ]; then
+        unformatted=$("$gofmt_bin" -l $gofiles 2>/dev/null)
+        if [ -n "$unformatted" ]; then
+            bad "these Go files are not gofmt-clean:"
+            printf '%s\n' "$unformatted" >&2
+            note "Run: gofmt -w <files>"
+        fi
+    fi
+else
+    note "gofmt not found, skipping the format check"
+fi
+
+if [ "$fail" -ne 0 ]; then
+    printf '\nBypass with: git commit -n\n' >&2
+    exit 1
+fi
+exit 0
