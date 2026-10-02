@@ -236,6 +236,65 @@ switch ($Target) {
         }
         Write-Host 'OK: device deps contain no sdl package' -ForegroundColor Green
 
+        Write-Host '==> Build tag dispatch: host/device files must not overlap' -ForegroundColor Cyan
+        # Platform dispatch relies on build tags. A too-wide tag does not break the
+        # build -- it silently compiles both implementations in -- so assert
+        # explicitly which side was compiled instead of only checking "it builds".
+        $c1dev = Join-Path $root 'c1device'
+
+        # Let go decide whether a file is compiled in (compares names in its own
+        # template), avoiding filename string handling in PowerShell.
+        # PowerShell strips double quotes when passing args to native commands, which
+        # would break any go template that compares against a quoted string.
+        # So emit plain file names and match them here instead.
+        $listFmt = '{{range .GoFiles}}{{.}}
+{{end}}'
+
+        foreach ($combo in @(
+                @{ os = 'windows'; arch = 'amd64';    mips = $null;     wantDevice = $false },
+                @{ os = 'linux';   arch = 'amd64';    mips = $null;     wantDevice = $false },
+                @{ os = 'linux';   arch = 'mipsle'; mips = 'hardfloat'; wantDevice = $true })) {
+            $env:CGO_ENABLED = '0'
+            $env:GOOS = $combo.os
+            $env:GOARCH = $combo.arch
+            if ($combo.mips) { $env:GOMIPS = $combo.mips } else { Remove-Item Env:GOMIPS -ErrorAction SilentlyContinue }
+
+            $flags = & $go -C $c1dev list -f $listFmt .
+            $listExit = $LASTEXITCODE
+            Remove-Item Env:GOOS, Env:GOARCH, Env:GOMIPS -ErrorAction SilentlyContinue
+
+            if ($listExit -ne 0) { throw "go list failed for $($combo.os)/$($combo.arch)" }
+            # Split on the .go suffix rather than on newlines: PowerShell strips the
+        # newline characters out of the template argument passed to go.
+            $compiled = @([regex]::Matches("$flags", '[\w./-]+\.go') | ForEach-Object { $_.Value })
+            if ($compiled.Count -eq 0) { throw "go list returned no files for $($combo.os)/$($combo.arch)" }
+
+            $hasHost = $compiled -contains 'platform_host.go'
+            $hasDevice = $compiled -contains 'platform_device_linux_mipsle.go'
+            $hasDesktopLinux = $compiled -contains 'desktop_linux.go'
+            $hasDesktopStub = $compiled -contains 'desktop_stub.go'
+
+            # A too-wide tag does not break the build, so assert explicitly.
+            if ($combo.wantDevice) {
+                if ($hasHost -or $hasDesktopStub) {
+                    throw "build tag dispatch leak on $($combo.os)/$($combo.arch): host files compiled into the device build"
+                }
+                if (-not ($hasDevice -and $hasDesktopLinux)) {
+                    throw "device implementation missing for $($combo.os)/$($combo.arch)"
+                }
+                Write-Host "OK      $($combo.os)/$($combo.arch): device only" -ForegroundColor Green
+            }
+            else {
+                if ($hasDevice -or $hasDesktopLinux) {
+                    throw "build tag dispatch leak on $($combo.os)/$($combo.arch): device files compiled into a host build"
+                }
+                if (-not ($hasHost -and $hasDesktopStub)) {
+                    throw "host implementation missing for $($combo.os)/$($combo.arch)"
+                }
+                Write-Host "OK      $($combo.os)/$($combo.arch): host only" -ForegroundColor Green
+            }
+        }
+
         Write-Host '==> Frame decode cross-check (vs Python oracle)' -ForegroundColor Cyan
         & (Join-Path $root 'tools\crosscheck.ps1')
         if ($LASTEXITCODE -ne 0) { throw 'cross-check failed' }
