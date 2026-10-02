@@ -2,7 +2,7 @@
 
 package c1device
 
-// PC 模拟器后端：把 5624 字节的 1bpp 帧渲染到 SDL3 窗口。
+// PC 模拟器后端：把 5624 字节的 1bpp 帧渲染到 SDL3 窗口，并还原墨水屏观感。
 //
 // 设计要点
 //
@@ -16,6 +16,9 @@ package c1device
 // 模拟器开关（环境变量，详见 README）：
 //
 //	C1SIM_SCALE   窗口放大倍数，1..8，默认 4
+//	C1SIM_TIMING  1（默认）模拟刷新时序：全刷走"白→黑→白"闪烁，约 700ms
+//	              0 立即显示，便于截图与自动化
+//	C1SIM_GHOST   残影灰度 0..255，越大越淡，255 等于关闭，默认 192
 import (
 	"os"
 	"runtime"
@@ -31,11 +34,28 @@ const (
 	simDefaultScale = 4
 	simMinScale     = 1
 	simMaxScale     = 8
+
+	simDefaultGhost = 192
+)
+
+// 刷新时序取自 theBillLee/c1-slim 的实测：写入约 150ms，全刷约 700ms。
+const (
+	fullRefreshMs  = 700
+	partialWriteMs = 150
+)
+
+// 全刷闪烁的阶段划分（占 fullRefreshMs 的比例）：白 → 黑 → 白 → 内容
+const (
+	flashWhite1End = 0.30
+	flashBlackEnd  = 0.55
+	flashWhite2End = 0.85
 )
 
 // simOptions 是模拟器的运行参数，全部来自环境变量，在 OpenPlatform 时读取一次。
 type simOptions struct {
-	scale int32
+	scale  int32
+	timing bool
+	ghost  uint8
 }
 
 func envInt(name string, def int) int {
@@ -55,7 +75,20 @@ func readSimOptions() simOptions {
 	if scale > simMaxScale {
 		scale = simMaxScale
 	}
-	return simOptions{scale: scale}
+
+	ghost := envInt("C1SIM_GHOST", simDefaultGhost)
+	if ghost < 0 {
+		ghost = 0
+	}
+	if ghost > 255 {
+		ghost = 255
+	}
+
+	return simOptions{
+		scale:  scale,
+		timing: envInt("C1SIM_TIMING", 1) != 0,
+		ghost:  uint8(ghost),
+	}
 }
 
 type drawReq struct {
@@ -87,6 +120,37 @@ func OpenPlatform() (Platform, error) {
 	}
 	go p.pump()
 	return p, nil
+}
+
+// paintContent 把帧画进 RGBA 缓冲，并按上一次内容叠加残影。
+//
+// 残影规则：上一次是黑、这一次变白的像素，留一层灰而不是纯白。
+// 全刷会清掉残影（applyGhost=false），这正是应用"每 12 次做一次全刷防残影"的意义所在。
+// 返回更新后的"上一次黑点掩码"，供下一次计算残影。
+func paintContent(pix, gray []uint8, frame Frame, ghostFrom []bool, ghost uint8, applyGhost bool) []bool {
+	DecodeGray(frame, gray)
+
+	n := DisplayWidth * DisplayHeight
+	if ghostFrom == nil {
+		ghostFrom = make([]bool, n)
+	}
+
+	for i := 0; i < n; i++ {
+		v := gray[i]
+		if applyGhost && v == 0xFF && ghostFrom[i] {
+			v = ghost
+		}
+		pix[i*4], pix[i*4+1], pix[i*4+2] = v, v, v
+		ghostFrom[i] = gray[i] == 0x00
+	}
+	return ghostFrom
+}
+
+// paintFlat 把整屏填成同一灰度（全刷闪烁用）。
+func paintFlat(pix []byte, v uint8) {
+	for i := 0; i < len(pix)/4; i++ {
+		pix[i*4], pix[i*4+1], pix[i*4+2] = v, v, v
+	}
 }
 
 // pump 是唯一接触 SDL 的 goroutine。
@@ -140,6 +204,16 @@ func (p *hostPlatform) pump() {
 
 	// 当前按住的键 → 下一次产生重复事件的时间（仅记录可重复的键）
 	held := map[sdl.Scancode]time.Time{}
+
+	// 显示状态
+	var (
+		cur         Frame  // 待显示/正在显示的内容
+		haveContent bool   // 是否已经收到过一帧
+		ghostFrom   []bool // 上一次内容的黑点掩码，用于算残影
+		flashing    bool   // 是否正在走全刷闪烁
+		flashStart  time.Time
+		postFlash   bool // 闪烁刚结束，本帧应以"无残影"的干净画面呈现
+	)
 
 	for {
 		// 1) 抽干输入
@@ -200,18 +274,46 @@ func (p *hostPlatform) pump() {
 		// 2) 取最新的绘制请求（cap=1，最新胜）
 		select {
 		case req := <-p.draw:
-			DecodeGray(req.frame, gray)
-			for i, v := range gray {
-				pix[i*4], pix[i*4+1], pix[i*4+2] = v, v, v
+			cur = req.frame
+			haveContent = true
+			if req.full {
+				if p.opts.timing {
+					flashing = true
+					flashStart = time.Now()
+				} else {
+					postFlash = true // 不做动画，但语义上仍是"全刷后画面干净"
+				}
 			}
-			sdl.UpdateTexture(texture, nil, unsafe.Pointer(&pix[0]), DisplayWidth*4)
-			// req.full 目前只保留语义（真机用它触发墨水屏全刷动作）；
-			// 全刷闪烁与残影的观感还原在下一步实现。
-			_ = req.full
 		default:
 		}
 
-		// 3) 上屏
+		// 3) 计算本帧该显示什么
+		switch {
+		case flashing:
+			elapsed := float64(time.Since(flashStart).Milliseconds()) / float64(fullRefreshMs)
+			switch {
+			case elapsed < flashWhite1End:
+				paintFlat(pix, 0xFF)
+			case elapsed < flashBlackEnd:
+				paintFlat(pix, 0x00)
+			case elapsed < flashWhite2End:
+				paintFlat(pix, 0xFF)
+			default:
+				flashing = false
+				postFlash = true
+				ghostFrom = paintContent(pix, gray, cur, ghostFrom, p.opts.ghost, false)
+			}
+		case haveContent && postFlash:
+			postFlash = false
+			ghostFrom = paintContent(pix, gray, cur, ghostFrom, p.opts.ghost, false)
+		case haveContent:
+			ghostFrom = paintContent(pix, gray, cur, ghostFrom, p.opts.ghost, true)
+		}
+
+		// 4) 上屏
+		if haveContent || flashing {
+			sdl.UpdateTexture(texture, nil, unsafe.Pointer(&pix[0]), DisplayWidth*4)
+		}
 		sdl.SetRenderDrawColor(renderer, 0, 0, 0, 0xFF)
 		sdl.RenderClear(renderer)
 		sdl.RenderTexture(renderer, texture, nil, &dst)

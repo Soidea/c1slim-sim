@@ -41,6 +41,95 @@ func TestSimScaleKeyIgnoresOtherKeys(t *testing.T) {
 	}
 }
 
+// 残影：上一次是黑、这一次变白的像素应留一层灰，而不是纯白。
+func TestPaintContentGhost(t *testing.T) {
+	pix := make([]byte, DisplayWidth*DisplayHeight*4)
+	gray := make([]uint8, DisplayWidth*DisplayHeight)
+
+	var first Frame
+	setPixel(&first, 0, 0, true)
+	ghostFrom := paintContent(pix, gray, first, nil, 192, true)
+	if pix[0] != 0x00 {
+		t.Fatalf("新画的黑点应为 0x00, got %#x", pix[0])
+	}
+
+	var second Frame // 全白：刚才那个黑点现在变白
+	ghostFrom = paintContent(pix, gray, second, ghostFrom, 192, true)
+	if pix[0] != 192 {
+		t.Fatalf("变白的旧黑点应留残影 192, got %#x", pix[0])
+	}
+	if ghostFrom[0] {
+		t.Fatal("全白帧后 ghostFrom[0] 应为 false")
+	}
+}
+
+// 全刷会清除残影——这正是应用"每 12 次全刷一次"的意义。
+func TestFullRefreshClearsGhost(t *testing.T) {
+	pix := make([]byte, DisplayWidth*DisplayHeight*4)
+	gray := make([]uint8, DisplayWidth*DisplayHeight)
+
+	var first Frame
+	setPixel(&first, 0, 0, true)
+	ghostFrom := paintContent(pix, gray, first, nil, 192, true)
+
+	var second Frame
+	ghostFrom = paintContent(pix, gray, second, ghostFrom, 192, false) // applyGhost=false
+	if pix[0] != 0xFF {
+		t.Fatalf("全刷后应无残影(纯白), got %#x", pix[0])
+	}
+	if ghostFrom[0] {
+		t.Fatal("全刷后 ghostFrom 应反映当前帧（全白）")
+	}
+}
+
+// ghost=255 等于关闭残影。
+func TestGhostLevel255Disables(t *testing.T) {
+	pix := make([]byte, DisplayWidth*DisplayHeight*4)
+	gray := make([]uint8, DisplayWidth*DisplayHeight)
+
+	var first Frame
+	setPixel(&first, 5, 5, true)
+	ghostFrom := paintContent(pix, gray, first, nil, 255, true)
+
+	var second Frame
+	idx := (5*DisplayWidth + 5) * 4
+	paintContent(pix, gray, second, ghostFrom, 255, true)
+	if pix[idx] != 0xFF {
+		t.Fatalf("ghost=255 时不应有可见残影, got %#x", pix[idx])
+	}
+}
+
+func TestPaintFlat(t *testing.T) {
+	pix := make([]byte, DisplayWidth*DisplayHeight*4)
+	paintFlat(pix, 0x00)
+	for i := 0; i < DisplayWidth*DisplayHeight; i++ {
+		if pix[i*4] != 0x00 {
+			t.Fatalf("像素 %d 未填黑", i)
+		}
+	}
+	paintFlat(pix, 0xFF)
+	for i := 0; i < DisplayWidth*DisplayHeight; i++ {
+		if pix[i*4] != 0xFF {
+			t.Fatalf("像素 %d 未填白", i)
+		}
+	}
+}
+
+func TestReadSimOptionsTimingAndGhost(t *testing.T) {
+	t.Setenv("C1SIM_TIMING", "0")
+	if readSimOptions().timing {
+		t.Fatal("C1SIM_TIMING=0 应关闭时序模拟")
+	}
+	t.Setenv("C1SIM_TIMING", "1")
+	if !readSimOptions().timing {
+		t.Fatal("C1SIM_TIMING=1 应开启时序模拟")
+	}
+	t.Setenv("C1SIM_GHOST", "999")
+	if got := readSimOptions().ghost; got != 255 {
+		t.Fatalf("ghost 应钳到 255, got %d", got)
+	}
+}
+
 func TestReadSimOptionsClampsScale(t *testing.T) {
 	t.Setenv("C1SIM_SCALE", "99")
 	if got := readSimOptions().scale; got != simMaxScale {
