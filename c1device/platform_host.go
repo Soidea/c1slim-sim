@@ -20,6 +20,7 @@ package c1device
 //	              0 立即显示，便于截图与自动化
 //	C1SIM_GHOST   残影灰度 0..255，越大越淡，255 等于关闭，默认 192
 import (
+	"fmt"
 	"os"
 	"runtime"
 	"strconv"
@@ -171,7 +172,7 @@ func (p *hostPlatform) pump() {
 
 	var window *sdl.Window
 	var renderer *sdl.Renderer
-	if !sdl.CreateWindowAndRenderer("C1-Slim Simulator",
+	if !sdl.CreateWindowAndRenderer(simWindowTitle(scale),
 		DisplayWidth*scale, DisplayHeight*scale, 0, &window, &renderer) {
 		return
 	}
@@ -231,6 +232,7 @@ func (p *hostPlatform) pump() {
 					if s, ok := simScaleKey(key.Scancode, scale); ok && s != scale {
 						scale = s
 						sdl.SetWindowSize(window, DisplayWidth*scale, DisplayHeight*scale)
+						sdl.SetWindowTitle(window, simWindowTitle(scale)) // 标题里的倍数要跟着变
 						dst.W = float32(DisplayWidth * scale)
 						dst.H = float32(DisplayHeight * scale)
 					}
@@ -327,6 +329,12 @@ func (p *hostPlatform) pump() {
 
 		time.Sleep(8 * time.Millisecond) // 约 120fps，够跟手又不空转
 	}
+}
+
+// simWindowTitle 窗口标题：始终显示当前放大倍数与常用按键提示，
+// 免得忘掉 Ctrl+- 这类模拟器自身的快捷键（完整说明见 README.md）。
+func simWindowTitle(scale int32) string {
+	return fmt.Sprintf("C1-Slim Simulator %dx | Esc退出 | Ctrl+-缩小 Ctrl+=放大 Ctrl+0原尺寸 | 用法见 README.md", scale)
 }
 
 // simScaleKey 把 Ctrl 组合键映射成新的放大倍数。

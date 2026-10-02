@@ -3,10 +3,28 @@
 package c1device
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/jupiterrider/purego-sdl3/sdl"
 )
+
+// 窗口标题必须带上当前倍数（缩放后要同步更新）与快捷键提示。
+func TestSimWindowTitle(t *testing.T) {
+	title := simWindowTitle(3)
+	if !strings.Contains(title, "3x") {
+		t.Fatalf("标题应显示当前倍数, got %q", title)
+	}
+	if !strings.Contains(title, "README.md") {
+		t.Fatalf("标题应提示查看 README.md, got %q", title)
+	}
+	if !strings.Contains(title, "Ctrl+-") {
+		t.Fatalf("标题应提示缩小快捷键, got %q", title)
+	}
+	if simWindowTitle(3) == simWindowTitle(4) {
+		t.Fatal("倍数变化时标题必须变化")
+	}
+}
 
 func TestSimScaleKey(t *testing.T) {
 	cases := []struct {
