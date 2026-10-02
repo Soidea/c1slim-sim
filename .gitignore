@@ -4,3 +4,6 @@ build/
 
 # SDL3 运行时：不入库（体积大），由 build.ps1 从本机已装的 SDL3 复制
 third_party/*.dll
+
+# golden 的 PNG 是派生产物（由 .bin 生成），只保留确定性的 .bin
+tests/golden/*.png

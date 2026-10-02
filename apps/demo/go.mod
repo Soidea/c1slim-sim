@@ -1,6 +1,8 @@
-module c1device
+module c1demo
 
 go 1.26.0
+
+require c1device v0.0.0
 
 require (
 	github.com/ebitengine/purego v0.8.3 // indirect
@@ -9,3 +11,5 @@ require (
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.41.0 // indirect
 )
+
+replace c1device => ../../c1device
