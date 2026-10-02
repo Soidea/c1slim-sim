@@ -6,6 +6,8 @@
 | 目标 | 命令 | 产物 |
 |---|---|---|
 | PC 模拟器 | `.\build.ps1 -Target sim` | Windows 窗口程序 |
+| 无头单帧 | `.\build.ps1 -Target shot` | `build/shots/demo.png` |
+| 无头帧序列 | `.\build.ps1 -Target seq` | `build/shots/seq/demo_0001.png` …（默认 16 帧） |
 | 无头截图 | `.\build.ps1 -Target shot` | 不弹窗口，导出首帧 PNG → `build/shots/demo.png` |
 | 真机 | `.\build.ps1 -Target device` | `linux/mipsle` 静态 ELF |
 
@@ -117,8 +119,11 @@ $env:C1SIM_SCALE='2'; .\build\sim\demo.exe
 | `C1SIM_SCALE` | `4` | 窗口放大倍数，1..8 |
 | `C1SIM_TIMING` | `1` | `1` 模拟刷新时序（全刷"白→黑→白"闪烁，约 700ms）；`0` 立即显示，便于截图与自动化 |
 | `C1SIM_GHOST` | `192` | 残影灰度 0..255，越大越淡，`255` 等于关闭 |
-| `C1SIM_HEADLESS` | `0` | `1` 无头模式：不开窗口，导出首帧 PNG 后让应用正常退出 |
-| `C1SIM_DUMP` | `frame.png` | 无头模式的输出路径（目录不存在会自动创建） |
+| `C1SIM_HEADLESS` | `0` | `1` 无头模式：不开窗口，导出帧 PNG 后让应用正常退出 |
+| `C1SIM_DUMP` | `frame.png` | 无头模式的输出路径（目录不存在会自动创建）；多帧时作为文件名前缀 |
+| `C1SIM_FRAMES` | `1` | 无头模式导出帧数。`1` 只导首帧到 `C1SIM_DUMP`；`2..64` 导出带序号的帧序列并自动注入合成按键 |
+| `C1SIM_FRAME_DELAY` | `120` | 帧序列两帧间隔（毫秒），避免无节流狂写磁盘 |
+| `C1SIM_TIMEOUT` | `10` | 无头模式总超时（秒），到点强制退出 |
 
 ```powershell
 $env:C1SIM_SCALE='2'; $env:C1SIM_TIMING='0'; .\build\sim\demo.exe
@@ -140,6 +145,29 @@ $env:C1SIM_HEADLESS='1'; $env:C1SIM_DUMP='D:\tmp\ui.png'; .\build\sim\demo.exe
 - **完全不初始化 SDL**，因此**不需要窗口，也不需要 `SDL3.dll`**
 - 导出的是"干净"内容：不走闪烁动画、不叠残影
 - 导出后关闭事件通道，应用按正常退出路径结束（不是报错）；若 10 秒内没等到帧会超时退出，不会挂住
+
+### 无头帧序列（不开窗口，导出多帧）
+
+把一段交互过程导成一串带序号的 PNG，便于逐帧回归比对：
+
+```powershell
+.\build.ps1 -Target seq                       # → build/shots/seq/demo_0001..0016.png
+$env:C1SIM_FRAMES='32'; .\build.ps1 -Target seq # 换帧数（上限 64）
+```
+
+`C1SIM_DUMP` 在多帧时当**前缀**用，序号固定 4 位零填充（`demo_0003.png`），天然按序排列。
+
+**会不会一直截不停？** 不会，有四道刹车，任一触发就退出：帧数上限、总超时（`C1SIM_TIMEOUT`）、帧间隔、写盘失败立即终止。正常路径下几百毫秒到几秒内自己结束。
+
+关于画面内容：
+
+- 帧序列导出的同样是**干净帧**（无残影、无闪烁动画），可直接当回归基线
+- 帧与帧的差异来自**自动注入的合成按键**（`simScriptKeys`：下/确认/上/Pause/音量+/音量-/确认/下）。
+  没有按键就没有新帧——应用只在收到事件后才重绘，而 `Draw` 对相同内容会去重
+- 因此按键脚本里**每个键都必须改变渲染结果**，否则序列会停在那个画面上白等到超时。
+  当前脚本只含 Demo 一定会响应的键；**换成别的应用时要复核这个列表**
+- 脚本用尽后循环。应用是有限状态机时，绕一圈会回到相同画面（第 16 帧里通常有 1～2
+  帧与前面重复），这是预期行为——重复帧本身也是有效基线
 
 ### 墨水屏观感是怎么还原的
 

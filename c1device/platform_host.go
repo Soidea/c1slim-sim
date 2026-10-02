@@ -19,8 +19,13 @@ package c1device
 //	C1SIM_TIMING   1（默认）模拟刷新时序：全刷走"白→黑→白"闪烁，约 700ms
 //	               0 立即显示，便于截图与自动化
 //	C1SIM_GHOST    残影灰度 0..255，越大越淡，255 等于关闭，默认 192
-//	C1SIM_HEADLESS 1 无头模式：不开窗口，把首帧导出成 PNG 后让应用正常退出
+//	C1SIM_HEADLESS 1 无头模式：不开窗口，把帧导出成 PNG 后让应用正常退出
 //	C1SIM_DUMP     无头模式的输出路径，默认 frame.png
+//	               C1SIM_FRAMES>1 时作为文件名前缀，产出 <前缀>_0001.png 等序列
+//	C1SIM_FRAMES   无头模式导出的帧数，1（默认）只导首帧到 C1SIM_DUMP；
+//	               2..64 导出带序号的帧序列，并自动注入合成按键驱动画面变化
+//	C1SIM_FRAME_DELAY 相序列两帧的间隔毫秒数，默认 120，避免无节流狂写磁盘
+//	C1SIM_TIMEOUT  无头模式的总超时，默认 10s，到点强制退出，绝不挂住
 import (
 	"fmt"
 	"image"
@@ -29,6 +34,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 	"unsafe"
@@ -60,16 +66,39 @@ const (
 // simDefaultDump 是无头模式默认的输出文件名（相对当前工作目录）。
 const simDefaultDump = "frame.png"
 
-// 无头模式等第一帧的超时，避免应用在 CI 里永远挂着。
-const headlessWaitTimeout = 10 * time.Second
+// 无头模式的导出参数默认值与上界。
+const (
+	simDefaultFrames = 1
+	simMaxFrames     = 64
+
+	simDefaultFrameDelay = 120 * time.Millisecond
+	simMinFrameDelay     = 0
+	simMaxFrameDelay     = 5 * time.Second
+
+	simDefaultTimeout = 10 * time.Second
+)
+
+// simScriptKeys 是帧序列模式下自动注入的按键序列，用来驱动应用重绘。
+//
+// 每个键都必须改变渲染结果：Draw 对相同内容会去重，若某个键不产生新内容，
+// 序列就会停在那个画面上白等到超时。脚本在 frames 用尽后循环，因此它是
+// "周期"而非"覆盖全部交互"——应用是有限状态机时，绕一圈后会回到相同画面，
+// 这属于预期（重复帧本身也是有效的回归基线）。
+var simScriptKeys = []Key{
+	KeyDown, KeyOK, KeyUp, KeyPause,
+	KeyVolumeUp, KeyVolumeDown, KeyOK, KeyDown,
+}
 
 // simOptions 是模拟器的运行参数，全部来自环境变量，在 OpenPlatform 时读取一次。
 type simOptions struct {
-	scale    int32
-	timing   bool
-	ghost    uint8
-	headless bool
-	dump     string
+	scale      int32
+	timing     bool
+	ghost      uint8
+	headless   bool
+	dump       string
+	frames     int
+	frameDelay time.Duration
+	timeout    time.Duration
 }
 
 func envInt(name string, def int) int {
@@ -103,12 +132,36 @@ func readSimOptions() simOptions {
 		dump = simDefaultDump
 	}
 
+	frames := envInt("C1SIM_FRAMES", simDefaultFrames)
+	if frames < 1 {
+		frames = 1
+	}
+	if frames > simMaxFrames {
+		frames = simMaxFrames
+	}
+
+	delay := time.Duration(envInt("C1SIM_FRAME_DELAY", int(simDefaultFrameDelay/time.Millisecond))) * time.Millisecond
+	if delay < simMinFrameDelay {
+		delay = simMinFrameDelay
+	}
+	if delay > simMaxFrameDelay {
+		delay = simMaxFrameDelay
+	}
+
+	timeout := time.Duration(envInt("C1SIM_TIMEOUT", int(simDefaultTimeout/time.Second))) * time.Second
+	if timeout <= 0 {
+		timeout = simDefaultTimeout
+	}
+
 	return simOptions{
-		scale:    scale,
-		timing:   envInt("C1SIM_TIMING", 1) != 0,
-		ghost:    uint8(ghost),
-		headless: envInt("C1SIM_HEADLESS", 0) != 0,
-		dump:     dump,
+		scale:      scale,
+		timing:     envInt("C1SIM_TIMING", 1) != 0,
+		ghost:      uint8(ghost),
+		headless:   envInt("C1SIM_HEADLESS", 0) != 0,
+		dump:       dump,
+		frames:     frames,
+		frameDelay: delay,
+		timeout:    timeout,
 	}
 }
 
@@ -132,30 +185,89 @@ func writeGrayPNG(path string, gray []uint8) error {
 	return png.Encode(f, img)
 }
 
-// runHeadless 无头模式：不初始化 SDL，等第一帧到达后导出 PNG 并收工。
+// seqFramePath 把 C1SIM_DUMP 当成前缀，生成带序号的帧文件名：
+// out/demo.png + 第 3 帧 → out/demo_0003.png。序号固定 4 位，天然按序排列。
+func seqFramePath(base string, n int) string {
+	ext := filepath.Ext(base)
+	if ext == "" {
+		ext = ".png"
+	}
+	return fmt.Sprintf("%s_%04d%s", strings.TrimSuffix(base, ext), n, ext)
+}
+
+// runHeadless 无头模式：不初始化 SDL，把帧导出成 PNG 后收工。
 // 返回后 pump 的 defer 会关闭事件通道，应用据此正常退出（而不是报错）。
+//
+// 四道刹车保证一定停得下来：帧数上限、总超时、帧间隔、单帧等待上限。
 func (p *hostPlatform) runHeadless() {
 	gray := make([]uint8, DisplayWidth*DisplayHeight)
 	for i := range gray {
 		gray[i] = 0xFF
 	}
 
-	timeout := time.After(headlessWaitTimeout)
+	total := p.opts.frames
+	if total < 1 {
+		total = 1
+	}
+	exported := 0
+
+	// writeFrame 导出一帧并计数；返回 false 表示写盘失败，应立即收工（不重试）。
+	writeFrame := func(frame Frame) bool {
+		// 无头导出的是"干净"内容：不做闪烁动画，也不叠残影
+		DecodeGray(frame, gray)
+		path := p.opts.dump
+		if total > 1 {
+			path = seqFramePath(p.opts.dump, exported+1)
+		}
+		if err := writeGrayPNG(path, gray); err != nil {
+			fmt.Fprintf(os.Stderr, "headless: 导出失败: %v\n", err)
+			return false
+		}
+		exported++
+		fmt.Printf("headless: wrote %s (%dx%d) %d/%d\n",
+			path, DisplayWidth, DisplayHeight, exported, total)
+		return true
+	}
+
+	timeout := p.opts.timeout
+	if timeout <= 0 {
+		timeout = simDefaultTimeout // 零值 simOptions 也要有兜底，绝不立刻超时
+	}
+	deadline := time.After(timeout)
+	keySeq := 0
+
 	for {
 		select {
 		case req := <-p.draw:
-			// 无头导出的是"干净"内容：不做闪烁动画，也不叠残影
-			DecodeGray(req.frame, gray)
-			if err := writeGrayPNG(p.opts.dump, gray); err != nil {
-				fmt.Fprintf(os.Stderr, "headless: 导出失败: %v\n", err)
-			} else {
-				fmt.Printf("headless: wrote %s (%dx%d)\n", p.opts.dump, DisplayWidth, DisplayHeight)
+			if !writeFrame(req.frame) {
+				return
 			}
-			return
+			if exported >= total {
+				return // 帧数够了，正常收工
+			}
+
+			// 还想要更多帧：注入下一个按键，让应用重绘出新内容。
+			key := simScriptKeys[keySeq%len(simScriptKeys)]
+			keySeq++
+			select {
+			case p.out <- Event{Key: key}:
+			case <-p.quit:
+				return
+			}
+
+			if p.opts.frameDelay > 0 {
+				timer := time.NewTimer(p.opts.frameDelay)
+				select {
+				case <-timer.C:
+				case <-p.quit:
+					timer.Stop()
+					return
+				}
+			}
 		case <-p.quit:
 			return
-		case <-timeout:
-			fmt.Fprintln(os.Stderr, "headless: 等待首帧超时")
+		case <-deadline:
+			fmt.Fprintf(os.Stderr, "headless: 超时收工，已导出 %d/%d 帧\n", exported, total)
 			return
 		}
 	}

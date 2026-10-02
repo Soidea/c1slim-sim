@@ -2,6 +2,7 @@
 #
 #   .\build.ps1 -Target sim      build PC simulator (Windows window, SDL3)
 #   .\build.ps1 -Target shot     headless: no window, dump the first frame to PNG
+#   .\build.ps1 -Target seq      headless: dump a numbered frame sequence to build/shots/seq/
 #   .\build.ps1 -Target device   cross-compile device ELF (linux/mipsle, static)
 #   .\build.ps1 -Target check    run all tests + verify device side has no SDL
 #
@@ -11,7 +12,7 @@
 #     `!linux || !mipsle`, so they are not compiled at all for linux/mipsle
 #     (see the isolation check in -Target check).
 param(
-    [ValidateSet('sim', 'shot', 'device', 'check')]
+    [ValidateSet('sim', 'shot', 'seq', 'device', 'check')]
     [string]$Target = 'sim',
     [string]$App = 'demo'
 )
@@ -82,6 +83,32 @@ switch ($Target) {
             Remove-Item Env:C1SIM_HEADLESS, Env:C1SIM_DUMP -ErrorAction SilentlyContinue
         }
         Write-Host "==> Done: $dump" -ForegroundColor Green
+    }
+
+    'seq' {
+        $frames = if ($env:C1SIM_FRAMES) { [int]$env:C1SIM_FRAMES } else { 16 }
+        Write-Host "==> Headless frame sequence ($frames frames, no window)" -ForegroundColor Cyan
+        Build-Sim | Out-Null
+
+        $seqDir = Join-Path $root 'build/shots/seq'
+        Remove-Item $seqDir -Recurse -Force -ErrorAction SilentlyContinue
+        New-Item -ItemType Directory -Force -Path $seqDir | Out-Null
+        $dump = Join-Path $seqDir "$App.png"
+
+        $env:C1SIM_HEADLESS = '1'
+        $env:C1SIM_DUMP = $dump
+        $env:C1SIM_FRAMES = "$frames"
+        Push-Location (Join-Path $root 'build/sim')
+        try {
+            & ".\$App.exe"
+            if ($LASTEXITCODE -ne 0) { throw "$App exited with $LASTEXITCODE" }
+        }
+        finally {
+            Pop-Location
+            Remove-Item Env:C1SIM_HEADLESS, Env:C1SIM_DUMP, Env:C1SIM_FRAMES -ErrorAction SilentlyContinue
+        }
+        $n = (Get-ChildItem $seqDir -Filter '*.png').Count
+        Write-Host "==> Done: $n frames in $seqDir" -ForegroundColor Green
     }
 
     'device' {

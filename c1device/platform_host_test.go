@@ -208,6 +208,163 @@ func TestRunHeadlessWritesFrameAndReturns(t *testing.T) {
 	}
 }
 
+func TestSeqFramePath(t *testing.T) {
+	cases := []struct {
+		base string
+		n    int
+		want string
+	}{
+		{"out/demo.png", 3, "out/demo_0003.png"},
+		{"demo.png", 16, "demo_0016.png"},
+		{"frame", 2, "frame_0002.png"}, // 无扩展名时补 .png
+	}
+	for _, c := range cases {
+		if got := seqFramePath(c.base, c.n); got != c.want {
+			t.Fatalf("seqFramePath(%q, %d) = %q, want %q", c.base, c.n, got, c.want)
+		}
+	}
+}
+
+// 帧序列必须导满 frames 帧就停，且文件名带 4 位序号。
+// 模拟一个"收到按键就重绘"的应用：runHeadless 注入按键 → 我们回一帧。
+func TestRunHeadlessExportsSequenceAndStops(t *testing.T) {
+	dir := t.TempDir()
+	base := filepath.Join(dir, "demo.png")
+	frames := 4
+
+	p := &hostPlatform{
+		out:  make(chan Event, 16),
+		draw: make(chan drawReq, 1),
+		quit: make(chan struct{}),
+		done: make(chan struct{}),
+		opts: simOptions{
+			headless:   true,
+			dump:       base,
+			frames:     frames,
+			frameDelay: 0,
+			timeout:    10 * time.Second,
+		},
+	}
+
+	var frame Frame
+	setPixel(&frame, 10, 10, true)
+	p.draw <- drawReq{frame: frame, full: true}
+
+	// 假应用：每收到一个按键就回一帧
+	go func() {
+		for range p.out {
+			p.draw <- drawReq{frame: frame, full: false}
+		}
+	}()
+
+	done := make(chan struct{})
+	go func() { p.runHeadless(); close(done) }()
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("多帧导出未按帧数上限收工（会挂住）")
+	}
+
+	for i := 1; i <= frames; i++ {
+		path := seqFramePath(base, i)
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("缺少第 %d 帧 %s: %v", i, filepath.Base(path), err)
+		}
+	}
+	if _, err := os.Stat(seqFramePath(base, frames+1)); err == nil {
+		t.Fatalf("导出了第 %d 帧，超过上限 %d", frames+1, frames)
+	}
+}
+
+// 应用不再重绘时，靠总超时收工，绝不挂住。
+func TestRunHeadlessTimeoutStops(t *testing.T) {
+	p := &hostPlatform{
+		out:  make(chan Event, 16),
+		draw: make(chan drawReq, 1),
+		quit: make(chan struct{}),
+		done: make(chan struct{}),
+		opts: simOptions{
+			headless:   true,
+			dump:       filepath.Join(t.TempDir(), "demo.png"),
+			frames:     16,
+			frameDelay: 0,
+			timeout:    200 * time.Millisecond,
+		},
+	}
+
+	var frame Frame
+	setPixel(&frame, 10, 10, true)
+	p.draw <- drawReq{frame: frame, full: true}
+	// 之后不再回帧，模拟应用卡住不再重绘
+
+	done := make(chan struct{})
+	go func() { p.runHeadless(); close(done) }()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("应用不重绘时未按总超时收工（会挂住）")
+	}
+}
+
+func TestReadSimOptionsFrameSequence(t *testing.T) {
+	t.Setenv("C1SIM_FRAMES", "16")
+	if got := readSimOptions().frames; got != 16 {
+		t.Fatalf("frames = %d, want 16", got)
+	}
+	t.Setenv("C1SIM_FRAMES", "1000")
+	if got := readSimOptions().frames; got != simMaxFrames {
+		t.Fatalf("frames 应被限制在 %d, got %d", simMaxFrames, got)
+	}
+	t.Setenv("C1SIM_FRAMES", "0")
+	if got := readSimOptions().frames; got != 1 {
+		t.Fatalf("frames 至少为 1, got %d", got)
+	}
+
+	t.Setenv("C1SIM_FRAME_DELAY", "50")
+	if got := readSimOptions().frameDelay; got != 50*time.Millisecond {
+		t.Fatalf("frameDelay = %v", got)
+	}
+	t.Setenv("C1SIM_FRAME_DELAY", "")
+	if got := readSimOptions().frameDelay; got != simDefaultFrameDelay {
+		t.Fatalf("未设置时应回落到 %v, got %v", simDefaultFrameDelay, got)
+	}
+
+	t.Setenv("C1SIM_TIMEOUT", "3")
+	if got := readSimOptions().timeout; got != 3*time.Second {
+		t.Fatalf("timeout = %v", got)
+	}
+}
+
+// 帧序列脚本里的每个键都必须让应用重绘，否则 Draw 会去重，
+// 序列就会停在那个画面上白等到超时。
+//
+// 这层防不住"别的应用不处理某个键"的情况（c1device 不能反查 apps/demo），
+// 所以脚本只取 Demo 一定会改变状态的键，并且应用换实现时要复核这个列表。
+func TestSimScriptKeysAllChangeRender(t *testing.T) {
+	// Demo 不处理 Left/Right/Unknown；Back 会让应用直接退出。
+	inert := map[Key]bool{
+		KeyLeft:    true,
+		KeyRight:   true,
+		KeyUnknown: true,
+		KeyBack:    true,
+	}
+	for i, k := range simScriptKeys {
+		if inert[k] {
+			t.Fatalf("simScriptKeys[%d] = %v 不改变渲染，序列会停滞", i, k)
+		}
+		if k == KeyUnknown {
+			t.Fatalf("simScriptKeys[%d] 是 KeyUnknown", i)
+		}
+	}
+	for i := 1; i < len(simScriptKeys); i++ {
+		if simScriptKeys[i] == simScriptKeys[i-1] {
+			t.Fatalf("simScriptKeys[%d] 与前一个相同（%v），相邻重复没有意义", i, simScriptKeys[i])
+		}
+	}
+}
+
 func TestReadSimOptionsHeadless(t *testing.T) {
 	t.Setenv("C1SIM_HEADLESS", "1")
 	if !readSimOptions().headless {
