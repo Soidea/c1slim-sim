@@ -236,6 +236,33 @@ switch ($Target) {
         }
         Write-Host 'OK: device deps contain no sdl package' -ForegroundColor Green
 
+        Write-Host '==> Device build: vet + link + ELF header' -ForegroundColor Cyan
+        # The device-tagged tests (input_lifecycle / visual_key) carry
+        # `linux && mipsle`, so on Windows they are neither run nor type-checked.
+        # `go vet` to GOOS=linux GOARCH=mipsle gives them a full type check, and
+        # linking proves the device side actually compiles end to end.
+        $env:GOOS = 'linux'; $env:GOARCH = 'mipsle'; $env:GOMIPS = 'hardfloat'
+        $devOutDir = Join-Path $root 'build/device'
+        New-Item -ItemType Directory -Force -Path $devOutDir | Out-Null
+        Invoke-Go @('vet', './...') (Join-Path $root 'c1device')
+        Invoke-Go @('build', '-trimpath', '-ldflags', '-s -w -buildid=', '-o', "$devOutDir/$App", '.') (Join-Path $root "apps/$App")
+        Remove-Item Env:GOOS, Env:GOARCH, Env:GOMIPS -ErrorAction SilentlyContinue
+
+        # ELF sanity: magic, 32-bit, little-endian, MIPS, EXEC (static, no interpreter)
+        $elfPath = Join-Path $devOutDir $App
+        $elf = [System.IO.File]::ReadAllBytes($elfPath)
+        if ($elf.Length -lt 52 -or
+            $elf[0] -ne 0x7F -or $elf[1] -ne 0x45 -or $elf[2] -ne 0x4C -or $elf[3] -ne 0x46) {
+            throw "$App is not an ELF file"
+        }
+        if ($elf[4] -ne 1) { throw "ELF class is not 32-bit (EI_CLASS=$($elf[4]))" }
+        if ($elf[5] -ne 1) { throw "ELF data is not little-endian (EI_DATA=$($elf[5]))" }
+        $machine = [int]$elf[18] -bor([int]$elf[19] -shl 8)
+        if ($machine -ne 8) { throw "e_machine is not EM_MIPS ($machine)" }
+        $elfType = [int]$elf[16] -bor([int]$elf[17] -shl 8)
+        if ($elfType -ne 2) { throw "ELF type is not ET_EXEC (static), got $elfType" }
+        Write-Host "OK: device ELF $([int]$elf[18])/mips, $([math]::Round($elf.Length/1MB,1)) MB" -ForegroundColor Green
+
         Write-Host '==> Build tag dispatch: host/device files must not overlap' -ForegroundColor Cyan
         # Platform dispatch relies on build tags. A too-wide tag does not break the
         # build -- it silently compiles both implementations in -- so assert
