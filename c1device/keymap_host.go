@@ -6,7 +6,29 @@ package c1device
 //
 // 这里**不复用**包内的 mapKey()：它是面向真机 evdev 硬件键矩阵的私有函数，
 // 且覆盖不全（没有 Esc / Space / Tab，缺大量字母）。模拟器直接构造 Event。
-import "github.com/jupiterrider/purego-sdl3/sdl"
+import (
+	"time"
+
+	"github.com/jupiterrider/purego-sdl3/sdl"
+)
+
+const (
+	// 长按后首次重复的等待时间，以及之后的重复间隔。
+	// 取值参照常见实体键盘手感，让"长按翻页"和真机接近。
+	repeatDelay    = 450 * time.Millisecond
+	repeatInterval = 90 * time.Millisecond
+)
+
+// repeatableKey 判定哪些键支持长按自动重复。
+// 真机由 evdev 的 value==2 提供；这里用软件节奏复刻。
+// 只有导航与音量键重复——打字类按键重复会干扰输入。
+func repeatableKey(k Key) bool {
+	switch k {
+	case KeyUp, KeyDown, KeyLeft, KeyRight, KeyVolumeUp, KeyVolumeDown:
+		return true
+	}
+	return false
+}
 
 func mapSDLScancode(sc sdl.Scancode) (Event, bool) {
 	switch sc {

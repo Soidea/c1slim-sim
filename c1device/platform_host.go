@@ -138,6 +138,9 @@ func (p *hostPlatform) pump() {
 		gray[i] = 0xFF // 起始白屏
 	}
 
+	// 当前按住的键 → 下一次产生重复事件的时间（仅记录可重复的键）
+	held := map[sdl.Scancode]time.Time{}
+
 	for {
 		// 1) 抽干输入
 		var event sdl.Event
@@ -160,13 +163,37 @@ func (p *hostPlatform) pump() {
 					continue
 				}
 				if key.Repeat {
-					continue // 自动重复由模拟器自己按软件节奏产生，忽略 OS 重复
+					continue // 重复由下面按软件节奏产生，忽略 OS 的重复事件
 				}
 				if ev, ok := mapSDLScancode(key.Scancode); ok {
 					p.emit(ev)
+					if repeatableKey(ev.Key) {
+						if _, already := held[key.Scancode]; !already {
+							held[key.Scancode] = time.Now().Add(repeatDelay)
+						}
+					}
 				}
 			case sdl.EventKeyUp:
-				continue
+				delete(held, event.Key().Scancode)
+			case sdl.EventWindowFocusLost:
+				// 失焦后收不到 keyup，必须清空，否则会一直重复下去
+				for sc := range held {
+					delete(held, sc)
+				}
+			}
+		}
+
+		// 1b) 软件自动重复：长按导航/音量键时持续产生 Repeat=true 的事件
+		if len(held) > 0 {
+			now := time.Now()
+			for sc, next := range held {
+				if now.Before(next) {
+					continue
+				}
+				if ev, ok := mapSDLScancode(sc); ok && repeatableKey(ev.Key) {
+					p.emit(Event{Key: ev.Key, Repeat: true})
+				}
+				held[sc] = now.Add(repeatInterval)
 			}
 		}
 
