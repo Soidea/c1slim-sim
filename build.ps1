@@ -3,6 +3,7 @@
 #   .\build.ps1 -Target sim      build PC simulator (Windows window, SDL3)
 #   .\build.ps1 -Target shot     headless: no window, dump the first frame to PNG
 #   .\build.ps1 -Target seq      headless: dump a numbered frame sequence to build/shots/seq/
+#   .\build.ps1 -Target regress  dump the sequence twice and compare pixel by pixel (CI gate)
 #   .\build.ps1 -Target device   cross-compile device ELF (linux/mipsle, static)
 #   .\build.ps1 -Target check    run all tests + verify device side has no SDL
 #
@@ -12,7 +13,7 @@
 #     `!linux || !mipsle`, so they are not compiled at all for linux/mipsle
 #     (see the isolation check in -Target check).
 param(
-    [ValidateSet('sim', 'shot', 'seq', 'device', 'check')]
+    [ValidateSet('sim', 'shot', 'seq', 'regress', 'device', 'check')]
     [string]$Target = 'sim',
     [string]$App = 'demo'
 )
@@ -56,6 +57,62 @@ function Build-Sim {
     return $outDir
 }
 
+# Run the app headless (no window, no SDL) and dump a frame sequence.
+# $DumpPath is used as a filename prefix when $Frames is greater than 1.
+function Invoke-Headless {
+    param([string]$DumpPath, [int]$Frames)
+
+    $env:C1SIM_HEADLESS = '1'
+    $env:C1SIM_DUMP = $DumpPath
+    $env:C1SIM_FRAMES = "$Frames"
+    Push-Location (Join-Path $root 'build/sim')
+    try {
+        & ".\$App.exe"
+        if ($LASTEXITCODE -ne 0) { throw "$App exited with $LASTEXITCODE" }
+    }
+    finally {
+        Pop-Location
+        Remove-Item Env:C1SIM_HEADLESS, Env:C1SIM_DUMP, Env:C1SIM_FRAMES -ErrorAction SilentlyContinue
+    }
+}
+
+# Count differing pixels between two PNGs. Returns -1 if either file is missing,
+# -2 if the dimensions differ, otherwise the number of differing pixels.
+function Get-PngPixelDiff {
+    param([string]$PathA, [string]$PathB)
+
+    if (-not (Test-Path $PathA) -or -not (Test-Path $PathB)) { return -1 }
+    Add-Type -AssemblyName System.Drawing
+    $ba = [System.Drawing.Bitmap]::FromFile($PathA)
+    $bb = [System.Drawing.Bitmap]::FromFile($PathB)
+    try {
+        if ($ba.Width -ne $bb.Width -or $ba.Height -ne $bb.Height) { return -2 }
+        $rect = New-Object System.Drawing.Rectangle 0, 0, $ba.Width, $ba.Height
+        $data = $ba.LockBits($rect, 'ReadOnly', 'Format32bppArgb')
+        $dataB = $bb.LockBits($rect, 'ReadOnly', 'Format32bppArgb')
+        try {
+            $len = $data.Stride * $data.Height
+            $buf = New-Object byte[] $len
+            $bufB = New-Object byte[] $len
+            [System.Runtime.InteropServices.Marshal]::Copy($data.Scan0, $buf, 0, $len)
+            [System.Runtime.InteropServices.Marshal]::Copy($dataB.Scan0, $bufB, 0, $len)
+            $diff = 0
+            for ($i = 0; $i -lt $len; $i += 4) {
+                if ($buf[$i] -ne $bufB[$i]) { $diff++ }
+            }
+            return $diff
+        }
+        finally {
+            $ba.UnlockBits($data)
+            $bb.UnlockBits($dataB)
+        }
+    }
+    finally {
+        $ba.Dispose()
+        $bb.Dispose()
+    }
+}
+
 switch ($Target) {
     'sim' {
         Write-Host '==> Building PC simulator (windows/amd64, zero cgo)' -ForegroundColor Cyan
@@ -71,17 +128,7 @@ switch ($Target) {
         New-Item -ItemType Directory -Force -Path $shotDir | Out-Null
         $dump = Join-Path $shotDir "$App.png"
 
-        $env:C1SIM_HEADLESS = '1'
-        $env:C1SIM_DUMP = $dump
-        Push-Location (Join-Path $root 'build/sim')
-        try {
-            & ".\$App.exe"
-            if ($LASTEXITCODE -ne 0) { throw "$App exited with $LASTEXITCODE" }
-        }
-        finally {
-            Pop-Location
-            Remove-Item Env:C1SIM_HEADLESS, Env:C1SIM_DUMP -ErrorAction SilentlyContinue
-        }
+        Invoke-Headless -DumpPath $dump -Frames 1
         Write-Host "==> Done: $dump" -ForegroundColor Green
     }
 
@@ -93,22 +140,58 @@ switch ($Target) {
         $seqDir = Join-Path $root 'build/shots/seq'
         Remove-Item $seqDir -Recurse -Force -ErrorAction SilentlyContinue
         New-Item -ItemType Directory -Force -Path $seqDir | Out-Null
-        $dump = Join-Path $seqDir "$App.png"
 
-        $env:C1SIM_HEADLESS = '1'
-        $env:C1SIM_DUMP = $dump
-        $env:C1SIM_FRAMES = "$frames"
-        Push-Location (Join-Path $root 'build/sim')
-        try {
-            & ".\$App.exe"
-            if ($LASTEXITCODE -ne 0) { throw "$App exited with $LASTEXITCODE" }
-        }
-        finally {
-            Pop-Location
-            Remove-Item Env:C1SIM_HEADLESS, Env:C1SIM_DUMP, Env:C1SIM_FRAMES -ErrorAction SilentlyContinue
-        }
+        Invoke-Headless -DumpPath (Join-Path $seqDir "$App.png") -Frames $frames
         $n = (Get-ChildItem $seqDir -Filter '*.png').Count
         Write-Host "==> Done: $n frames in $seqDir" -ForegroundColor Green
+    }
+
+    'regress' {
+        $frames = if ($env:C1SIM_FRAMES) { [int]$env:C1SIM_FRAMES } else { 16 }
+        Write-Host "==> Two-round frame regression ($frames frames each, no window)" -ForegroundColor Cyan
+        Build-Sim | Out-Null
+
+        $regDir = Join-Path $root 'build/shots/regress'
+        Remove-Item $regDir -Recurse -Force -ErrorAction SilentlyContinue
+
+        $rounds = @()
+        foreach ($name in @('round1', 'round2')) {
+            $dir = Join-Path $regDir $name
+            New-Item -ItemType Directory -Force -Path $dir | Out-Null
+            Write-Host "--> $name" -ForegroundColor DarkGray
+            Invoke-Headless -DumpPath (Join-Path $dir "$App.png") -Frames $frames
+            $rounds += ,$dir
+        }
+
+        # Frame count must match exactly: a short run means the exporter gave up early.
+        foreach ($dir in $rounds) {
+            $n = (Get-ChildItem $dir -Filter '*.png').Count
+            if ($n -ne $frames) {
+                throw "$(Split-Path -Leaf $dir) exported $n frames, expected $frames"
+            }
+        }
+
+        Write-Host '==> Comparing the two rounds pixel by pixel' -ForegroundColor Cyan
+        $mismatch = @()
+        for ($i = 1; $i -le $frames; $i++) {
+            $name = '{0}_{1:d4}.png' -f $App, $i
+            $diff = Get-PngPixelDiff (Join-Path $rounds[0] $name) (Join-Path $rounds[1] $name)
+            switch ($diff) {
+                0 { Write-Host "OK      $name" }
+                -1 { Write-Host "MISSING $name" -ForegroundColor Red; $mismatch += $name }
+                -2 { Write-Host "SIZE    $name (dimensions differ)" -ForegroundColor Red; $mismatch += $name }
+                default {
+                    Write-Host "DIFF    $name  $diff pixels differ" -ForegroundColor Red
+                    $mismatch += $name
+                }
+            }
+        }
+
+        if ($mismatch.Count -gt 0) {
+            throw "frame regression FAILED: $($mismatch.Count)/$frames frames differ (non-deterministic render)"
+        }
+        Write-Host "==> Done: $frames/$frames frames identical across both rounds" -ForegroundColor Green
+        Write-Host "    artifacts: $regDir" -ForegroundColor DarkGray
     }
 
     'device' {

@@ -8,6 +8,7 @@
 | PC 模拟器 | `.\build.ps1 -Target sim` | Windows 窗口程序 |
 | 无头单帧 | `.\build.ps1 -Target shot` | `build/shots/demo.png` |
 | 无头帧序列 | `.\build.ps1 -Target seq` | `build/shots/seq/demo_0001.png` …（默认 16 帧） |
+| 双轮回归 | `.\build.ps1 -Target regress` | 导两轮逐帧比对，不一致则退出码 1 |
 | 无头截图 | `.\build.ps1 -Target shot` | 不弹窗口，导出首帧 PNG → `build/shots/demo.png` |
 | 真机 | `.\build.ps1 -Target device` | `linux/mipsle` 静态 ELF |
 
@@ -168,6 +169,30 @@ $env:C1SIM_FRAMES='32'; .\build.ps1 -Target seq # 换帧数（上限 64）
   当前脚本只含 Demo 一定会响应的键；**换成别的应用时要复核这个列表**
 - 脚本用尽后循环。应用是有限状态机时，绕一圈会回到相同画面（第 16 帧里通常有 1～2
   帧与前面重复），这是预期行为——重复帧本身也是有效基线
+
+### 双轮逐帧回归（确定性检查）
+
+把帧序列导两遍，逐帧比对像素，验证渲染是**确定性的**（没有随机状态、时间戳、
+未初始化内存等）。任何一帧不一致都会打印差异像素数并以**退出码 1** 结束，可直接用作 CI 闸门：
+
+```powershell
+.\build.ps1 -Target regress                    # 16 帧 × 2 轮
+$env:C1SIM_FRAMES='32'; .\build.ps1 -Target regress
+```
+
+产物在 `build/shots/regress/round1|round2/`，可以直接肉眼 diff。
+
+会检查两类问题：
+
+| 报告 | 含义 |
+|---|---|
+| `DIFF` | 同一帧两轮像素不同 → 渲染不确定 |
+| `SIZE` | 尺寸不同 |
+| `MISSING` | 某轮少导了这一帧（也会先按帧数上限校验并直接失败） |
+
+注意这是**两轮之间**的自比对，验证的是确定性；它不与仓库里的历史基线比对，
+因此每次都从当前代码出发，不会因为渲染的合理改动而失败。要长期锁定某个视觉基线，
+把 `build/shots/seq/` 里的 PNG 提交进仓库另行比对。
 
 ### 墨水屏观感是怎么还原的
 
