@@ -1,6 +1,7 @@
 # C1-Slim simulator: dual-target build script (ASCII only, no BOM needed)
 #
 #   .\build.ps1 -Target sim      build PC simulator (Windows window, SDL3)
+#   .\build.ps1 -Target shot     headless: no window, dump the first frame to PNG
 #   .\build.ps1 -Target device   cross-compile device ELF (linux/mipsle, static)
 #   .\build.ps1 -Target check    run all tests + verify device side has no SDL
 #
@@ -10,7 +11,7 @@
 #     `!linux || !mipsle`, so they are not compiled at all for linux/mipsle
 #     (see the isolation check in -Target check).
 param(
-    [ValidateSet('sim', 'device', 'check')]
+    [ValidateSet('sim', 'shot', 'device', 'check')]
     [string]$Target = 'sim',
     [string]$App = 'demo'
 )
@@ -37,23 +38,50 @@ function Invoke-Go {
     finally { Pop-Location }
 }
 
+function Build-Sim {
+    Remove-Item Env:GOOS, Env:GOARCH, Env:GOMIPS -ErrorAction SilentlyContinue
+    $env:CGO_ENABLED = '0'
+
+    $outDir = Join-Path $root 'build/sim'
+    New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+    Invoke-Go @('build', '-o', "$outDir/$App.exe", '.') (Join-Path $root "apps/$App")
+
+    # purego loads SDL3.dll from the executable's directory at runtime.
+    $dll = Get-SDL3Dll
+    if (-not $dll) {
+        throw 'SDL3.dll not found. Expected D:\DevProgramsSDK\SDL3\*\x86_64-w64-mingw32\bin\SDL3.dll'
+    }
+    Copy-Item $dll.FullName -Destination $outDir -Force
+    return $outDir
+}
+
 switch ($Target) {
     'sim' {
         Write-Host '==> Building PC simulator (windows/amd64, zero cgo)' -ForegroundColor Cyan
-        Remove-Item Env:GOOS, Env:GOARCH, Env:GOMIPS -ErrorAction SilentlyContinue
-        $env:CGO_ENABLED = '0'
-
-        $outDir = Join-Path $root 'build/sim'
-        New-Item -ItemType Directory -Force -Path $outDir | Out-Null
-        Invoke-Go @('build', '-o', "$outDir/$App.exe", '.') (Join-Path $root "apps/$App")
-
-        # purego loads SDL3.dll from the executable's directory at runtime.
-        $dll = Get-SDL3Dll
-        if (-not $dll) {
-            throw 'SDL3.dll not found. Expected D:\DevProgramsSDK\SDL3\*\x86_64-w64-mingw32\bin\SDL3.dll'
-        }
-        Copy-Item $dll.FullName -Destination $outDir -Force
+        $outDir = Build-Sim
         Write-Host "==> Done: $outDir/$App.exe (SDL3.dll copied alongside)" -ForegroundColor Green
+    }
+
+    'shot' {
+        Write-Host '==> Headless screenshot (no window)' -ForegroundColor Cyan
+        Build-Sim | Out-Null
+
+        $shotDir = Join-Path $root 'build/shots'
+        New-Item -ItemType Directory -Force -Path $shotDir | Out-Null
+        $dump = Join-Path $shotDir "$App.png"
+
+        $env:C1SIM_HEADLESS = '1'
+        $env:C1SIM_DUMP = $dump
+        Push-Location (Join-Path $root 'build/sim')
+        try {
+            & ".\$App.exe"
+            if ($LASTEXITCODE -ne 0) { throw "$App exited with $LASTEXITCODE" }
+        }
+        finally {
+            Pop-Location
+            Remove-Item Env:C1SIM_HEADLESS, Env:C1SIM_DUMP -ErrorAction SilentlyContinue
+        }
+        Write-Host "==> Done: $dump" -ForegroundColor Green
     }
 
     'device' {

@@ -5,7 +5,8 @@
 
 | 目标 | 命令 | 产物 |
 |---|---|---|
-| PC 模拟器 | `.\build.ps1 -Target sim` | Windows 窗口程序（1184×608） |
+| PC 模拟器 | `.\build.ps1 -Target sim` | Windows 窗口程序 |
+| 无头截图 | `.\build.ps1 -Target shot` | 不弹窗口，导出首帧 PNG → `build/shots/demo.png` |
 | 真机 | `.\build.ps1 -Target device` | `linux/mipsle` 静态 ELF |
 
 > ⚠️ **验证等级**：本项目已在 PC 模拟器与交叉编译层面验证，**尚未在实机上验收**
@@ -116,10 +117,29 @@ $env:C1SIM_SCALE='2'; .\build\sim\demo.exe
 | `C1SIM_SCALE` | `4` | 窗口放大倍数，1..8 |
 | `C1SIM_TIMING` | `1` | `1` 模拟刷新时序（全刷"白→黑→白"闪烁，约 700ms）；`0` 立即显示，便于截图与自动化 |
 | `C1SIM_GHOST` | `192` | 残影灰度 0..255，越大越淡，`255` 等于关闭 |
+| `C1SIM_HEADLESS` | `0` | `1` 无头模式：不开窗口，导出首帧 PNG 后让应用正常退出 |
+| `C1SIM_DUMP` | `frame.png` | 无头模式的输出路径（目录不存在会自动创建） |
 
 ```powershell
 $env:C1SIM_SCALE='2'; $env:C1SIM_TIMING='0'; .\build\sim\demo.exe
 ```
+
+### 无头截图（不开窗口，导出单帧）
+
+适合回归比对、CI、或只想把画面存成图片：
+
+```powershell
+.\build.ps1 -Target shot          # → build/shots/demo.png（296×152，1bpp 真实尺寸）
+
+# 自定义输出路径
+$env:C1SIM_HEADLESS='1'; $env:C1SIM_DUMP='D:\tmp\ui.png'; .\build\sim\demo.exe
+```
+
+要点：
+
+- **完全不初始化 SDL**，因此**不需要窗口，也不需要 `SDL3.dll`**
+- 导出的是"干净"内容：不走闪烁动画、不叠残影
+- 导出后关闭事件通道，应用按正常退出路径结束（不是报错）；若 10 秒内没等到帧会超时退出，不会挂住
 
 ### 墨水屏观感是怎么还原的
 
@@ -252,6 +272,6 @@ third_party/     SDL3.dll（不入库，由 build.ps1 复制）
 
 ## 未实现（后续可加）
 
-- headless 截图（把某一帧直接导出 PNG，便于回归比对）
+- 导出多帧（目前只导出首帧；可做序列编号用于动画/回归）
 - 命令行参数形式（目前只用环境变量）
 - 鼠标/触摸事件（C1 Max 是触屏，C1-Slim 只有键盘，故暂不需要）

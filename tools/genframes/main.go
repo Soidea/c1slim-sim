@@ -4,8 +4,8 @@ package main
 
 import (
 	"flag"
-	"math/rand"
 	"log"
+	"math/rand"
 	"os"
 	"path/filepath"
 

@@ -15,13 +15,18 @@ package c1device
 //
 // 模拟器开关（环境变量，详见 README）：
 //
-//	C1SIM_SCALE   窗口放大倍数，1..8，默认 4
-//	C1SIM_TIMING  1（默认）模拟刷新时序：全刷走"白→黑→白"闪烁，约 700ms
-//	              0 立即显示，便于截图与自动化
-//	C1SIM_GHOST   残影灰度 0..255，越大越淡，255 等于关闭，默认 192
+//	C1SIM_SCALE    窗口放大倍数，1..8，默认 4
+//	C1SIM_TIMING   1（默认）模拟刷新时序：全刷走"白→黑→白"闪烁，约 700ms
+//	               0 立即显示，便于截图与自动化
+//	C1SIM_GHOST    残影灰度 0..255，越大越淡，255 等于关闭，默认 192
+//	C1SIM_HEADLESS 1 无头模式：不开窗口，把首帧导出成 PNG 后让应用正常退出
+//	C1SIM_DUMP     无头模式的输出路径，默认 frame.png
 import (
 	"fmt"
+	"image"
+	"image/png"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"sync"
@@ -52,11 +57,19 @@ const (
 	flashWhite2End = 0.85
 )
 
+// simDefaultDump 是无头模式默认的输出文件名（相对当前工作目录）。
+const simDefaultDump = "frame.png"
+
+// 无头模式等第一帧的超时，避免应用在 CI 里永远挂着。
+const headlessWaitTimeout = 10 * time.Second
+
 // simOptions 是模拟器的运行参数，全部来自环境变量，在 OpenPlatform 时读取一次。
 type simOptions struct {
-	scale  int32
-	timing bool
-	ghost  uint8
+	scale    int32
+	timing   bool
+	ghost    uint8
+	headless bool
+	dump     string
 }
 
 func envInt(name string, def int) int {
@@ -85,10 +98,66 @@ func readSimOptions() simOptions {
 		ghost = 255
 	}
 
+	dump := os.Getenv("C1SIM_DUMP")
+	if dump == "" {
+		dump = simDefaultDump
+	}
+
 	return simOptions{
-		scale:  scale,
-		timing: envInt("C1SIM_TIMING", 1) != 0,
-		ghost:  uint8(ghost),
+		scale:    scale,
+		timing:   envInt("C1SIM_TIMING", 1) != 0,
+		ghost:    uint8(ghost),
+		headless: envInt("C1SIM_HEADLESS", 0) != 0,
+		dump:     dump,
+	}
+}
+
+// writeGrayPNG 把每像素一字节的灰度缓冲写成 PNG（0x00 黑、0xFF 白）。
+func writeGrayPNG(path string, gray []uint8) error {
+	if dir := filepath.Dir(path); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+	}
+	img := &image.Gray{
+		Pix:    gray,
+		Stride: DisplayWidth,
+		Rect:   image.Rect(0, 0, DisplayWidth, DisplayHeight),
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return png.Encode(f, img)
+}
+
+// runHeadless 无头模式：不初始化 SDL，等第一帧到达后导出 PNG 并收工。
+// 返回后 pump 的 defer 会关闭事件通道，应用据此正常退出（而不是报错）。
+func (p *hostPlatform) runHeadless() {
+	gray := make([]uint8, DisplayWidth*DisplayHeight)
+	for i := range gray {
+		gray[i] = 0xFF
+	}
+
+	timeout := time.After(headlessWaitTimeout)
+	for {
+		select {
+		case req := <-p.draw:
+			// 无头导出的是"干净"内容：不做闪烁动画，也不叠残影
+			DecodeGray(req.frame, gray)
+			if err := writeGrayPNG(p.opts.dump, gray); err != nil {
+				fmt.Fprintf(os.Stderr, "headless: 导出失败: %v\n", err)
+			} else {
+				fmt.Printf("headless: wrote %s (%dx%d)\n", p.opts.dump, DisplayWidth, DisplayHeight)
+			}
+			return
+		case <-p.quit:
+			return
+		case <-timeout:
+			fmt.Fprintln(os.Stderr, "headless: 等待首帧超时")
+			return
+		}
 	}
 }
 
@@ -162,6 +231,12 @@ func (p *hostPlatform) pump() {
 	// 关闭 out 之前已投递的事件仍可被应用读到（Go 带缓冲 channel 的语义），
 	// 所以"关窗 = 按返回键"能让应用走正常退出路径而不是报错。
 	defer close(p.out)
+
+	// 无头模式在触碰 SDL 之前就分流：完全不初始化 SDL，不需要窗口也不需要 DLL。
+	if p.opts.headless {
+		p.runHeadless()
+		return
+	}
 
 	defer sdl.Quit()
 	if !sdl.Init(sdl.InitVideo) {

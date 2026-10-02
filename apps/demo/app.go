@@ -52,7 +52,7 @@ func (a *demoApp) render() c1device.Frame {
 	c.DrawText(a.face, 4, 134, a.message)
 
 	c.DrawRect(image.Rect(0, 0, c1device.DisplayWidth, c1device.DisplayHeight)) // 外框
-	return c.Frame(128)                                                          // 阈值与真机一致
+	return c.Frame(128)                                                         // 阈值与真机一致
 }
 
 // handleEvent 返回 true 表示退出应用。

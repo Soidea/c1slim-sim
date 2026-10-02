@@ -3,8 +3,13 @@
 package c1device
 
 import (
+	"image"
+	"image/png"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jupiterrider/purego-sdl3/sdl"
 )
@@ -130,6 +135,91 @@ func TestPaintFlat(t *testing.T) {
 		if pix[i*4] != 0xFF {
 			t.Fatalf("像素 %d 未填白", i)
 		}
+	}
+}
+
+// 导出的 PNG 必须能被第三方解码器读回，且尺寸/像素都对。
+func TestWriteGrayPNG(t *testing.T) {
+	// 故意放在不存在的子目录里，顺便验证会自动建目录
+	path := filepath.Join(t.TempDir(), "shots", "frame.png")
+
+	gray := make([]uint8, DisplayWidth*DisplayHeight)
+	for i := range gray {
+		gray[i] = 0xFF
+	}
+	gray[0] = 0x00 // 左上角一个黑点
+
+	if err := writeGrayPNG(path, gray); err != nil {
+		t.Fatalf("writeGrayPNG: %v", err)
+	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("导出文件不存在: %v", err)
+	}
+	defer f.Close()
+
+	img, err := png.Decode(f)
+	if err != nil {
+		t.Fatalf("导出的不是合法 PNG: %v", err)
+	}
+	if img.Bounds().Dx() != DisplayWidth || img.Bounds().Dy() != DisplayHeight {
+		t.Fatalf("尺寸 = %dx%d, want %dx%d", img.Bounds().Dx(), img.Bounds().Dy(), DisplayWidth, DisplayHeight)
+	}
+	g, ok := img.(*image.Gray)
+	if !ok {
+		t.Fatalf("应为灰度图, got %T", img)
+	}
+	if g.GrayAt(0, 0).Y != 0x00 {
+		t.Fatalf("(0,0) 应为黑, got %#x", g.GrayAt(0, 0).Y)
+	}
+	if g.GrayAt(1, 0).Y != 0xFF {
+		t.Fatalf("(1,0) 应为白, got %#x", g.GrayAt(1, 0).Y)
+	}
+}
+
+// 端到端：无头模式收到一帧后导出，并且不会卡住（无头路径不碰 SDL，可直接测）。
+func TestRunHeadlessWritesFrameAndReturns(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "out.png")
+
+	p := &hostPlatform{
+		out:  make(chan Event, 4),
+		draw: make(chan drawReq, 1),
+		quit: make(chan struct{}),
+		done: make(chan struct{}),
+		opts: simOptions{headless: true, dump: path},
+	}
+
+	var frame Frame
+	setPixel(&frame, 10, 10, true)
+	p.draw <- drawReq{frame: frame, full: true}
+
+	done := make(chan struct{})
+	go func() { p.runHeadless(); close(done) }()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("runHeadless 未返回（会挂住应用）")
+	}
+
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("未导出文件: %v", err)
+	}
+}
+
+func TestReadSimOptionsHeadless(t *testing.T) {
+	t.Setenv("C1SIM_HEADLESS", "1")
+	if !readSimOptions().headless {
+		t.Fatal("C1SIM_HEADLESS=1 应开启无头模式")
+	}
+	t.Setenv("C1SIM_DUMP", "out/demo.png")
+	if got := readSimOptions().dump; got != "out/demo.png" {
+		t.Fatalf("dump = %q, want out/demo.png", got)
+	}
+	t.Setenv("C1SIM_DUMP", "")
+	if got := readSimOptions().dump; got != simDefaultDump {
+		t.Fatalf("未设置时应回落到 %q, got %q", simDefaultDump, got)
 	}
 }
 
