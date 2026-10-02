@@ -35,7 +35,7 @@
 
 | 文件 | 改动 |
 |---|---|
-| `c1device/platform_host.go` | 由"仅存帧不渲染、事件通道永不写入"的空壳，重写为 SDL3 窗口后端：帧去重、首帧强制全刷、独立 pump goroutine（`LockOSThread` 独占 SDL 调用）、`UpdateTexture` + `RenderTexture` 上屏、关窗等价于按返回键 |
+| `c1device/platform_host.go` | 由"仅存帧不渲染、事件通道永不写入"的空壳，重写为 SDL3 窗口后端：帧去重、首帧强制全刷、独立 pump goroutine（`LockOSThread` 独占 SDL 调用）、`UpdateTexture` + `RenderTexture` 上屏、关窗等价于按返回键；另含放大倍数调节、按键长按自动重复、全刷闪烁与残影的观感还原 |
 
 ### 新增
 
@@ -43,7 +43,8 @@
 |---|---|
 | `c1device/decode.go` | 1bpp 帧解码（`Frame.Pixel`、`DecodeGray`），**无 build tag，两端共用** |
 | `c1device/decode_test.go` | 解码单元测试（含 strip 边界、位序、越界） |
-| `c1device/keymap_host.go` | SDL 物理键 → `Event` 映射 |
+| `c1device/keymap_host.go` | SDL 物理键 → `Event` 映射，以及可重复按键策略 |
+| `c1device/platform_host_test.go`、`keymap_host_test.go` | 缩放键钳制、环境变量回落、可重复键策略、残影与闪烁的纯函数测试 |
 | `apps/demo/*` | 示例应用 / 新应用开发模板 |
 | `tools/*` | golden 生成、Go 版 frame2png、Python oracle 与比对脚本 |
 | `build.ps1`、`crosscheck.ps1` | 双端构建与校验脚本 |
