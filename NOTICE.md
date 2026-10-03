@@ -17,37 +17,57 @@
 
 首次提交记录了该来源：`import: App/c1device @3684f45 from fwz233-RE/C1auncher (GPL-3.0)`
 
+帧格式（5624 字节 strip-major）随 `App/c1device` 一并取自上述上游。刷新时序（全刷 ~700ms、写入 ~150ms）为**借鉴** C1-Slim 固件实测值（`theBillLee/c1-slim`），未复制其代码。
+
 ---
 
 ## 2. 逐文件改动清单
 
-### 原样复制，未改动（禁止改动 —— 将来对接真机的唯一入口）
+### 原样复制，未改动（真机对接的唯一入口，勿改）
 
 | 文件 | 说明 |
 |---|---|
 | `c1device/device.go` | `Frame` / `Key` / `Event` / `Platform` 定义 |
 | `c1device/platform_device_linux_mipsle.go` | 真机后端（tag `linux && mipsle`） |
 | `c1device/text.go`、`bitmap.go`、`keymap.go` | 画布、点阵字体、真机 evdev 键位映射 |
-| `c1device/desktop_linux.go`、`desktop_stub.go` | `ReturnToDesktop()` |
-| `c1device/*_test.go` | 上游测试 |
+| `c1device/bitmap_test.go`、`keymap_test.go`、`text_test.go` | 上游测试（原样） |
+| `c1device/input_lifecycle_linux_mipsle_test.go`、`visual_key_linux_mipsle_test.go` | 上游真机侧测试（tag `linux && mipsle`） |
 
-### 重写
+> 这部分与上游 `App/c1device` 逐字节一致，可用 `diff` 核验；差异只出现在下面的 host 侧文件。
+
+### 修改（保持上游文件名，仅动 host 侧）
 
 | 文件 | 改动 |
 |---|---|
-| `c1device/platform_host.go` | 由"仅存帧不渲染、事件通道永不写入"的空壳，重写为 SDL3 窗口后端：帧去重、首帧强制全刷、独立 pump goroutine（`LockOSThread` 独占 SDL 调用）、`UpdateTexture` + `RenderTexture` 上屏、关窗等价于按返回键；另含放大倍数调节、按键长按自动重复、全刷闪烁与残影的观感还原 |
+| `c1device/platform_host.go` | 由"仅存帧不渲染、事件通道永不写入"的空壳，重写为 **SDL-free 公共骨架**：环境变量选项、PNG 导出辅助、`Draw`/`Events`/`Close`、与真机一致的帧去重 + 首帧强制全刷语义。原 SDL3 引擎移至 `platform_window.go` |
+| `c1device/desktop_linux.go` | build tag `linux` → `linux && mipsle`：原实现在 `C1_C1ANCHER_TERMINAL=1` 时 `SIGKILL` 父进程，收窄后仅真机触发，避免在 Linux 桌面跑模拟器时误杀 shell |
+| `c1device/desktop_stub.go` | build tag `!linux` → `!linux || !mipsle`（与上面对称，空实现覆盖所有非真机 host） |
+| `c1device/go.mod`、`go.sum` | 新增 `purego` + `purego-sdl3` 依赖（SDL3 运行时动态加载，零 cgo） |
 
 ### 新增
 
 | 文件 | 说明 |
 |---|---|
+| `c1device/platform_window.go` | SDL3 窗口 / 渲染 / 事件泵：独立 pump goroutine（`LockOSThread` 独占 SDL 调用）、`UpdateTexture` + `RenderTexture` 上屏、关窗等价于按返回键、放大倍数调节、按键长按自动重复、全刷闪烁与残影观感还原（默认构建，tag `!headless`） |
+| `c1device/platform_headless.go` | 纯无头导出泵，**完全不链接 SDL3**（`-tags headless`），可在无 SDL3 / 无显卡的 CI 上做渲染回归 |
+| `c1device/keymap_host.go` | SDL-free 的数值 scancode→rune 映射 + 长按重复配置 |
+| `c1device/keymap_window.go` | SDL 类型 scancode → `Event` 翻译（默认构建，tag `!headless`） |
 | `c1device/decode.go` | 1bpp 帧解码（`Frame.Pixel`、`DecodeGray`），**无 build tag，两端共用** |
 | `c1device/decode_test.go` | 解码单元测试（含 strip 边界、位序、越界） |
-| `c1device/keymap_host.go` | SDL 物理键 → `Event` 映射，以及可重复按键策略 |
 | `c1device/platform_host_test.go`、`keymap_host_test.go` | 缩放键钳制、环境变量回落、可重复键策略、残影与闪烁的纯函数测试 |
 | `apps/demo/*` | 示例应用 / 新应用开发模板 |
 | `tools/*` | golden 生成、Go 版 frame2png、Python oracle 与比对脚本 |
-| `build.ps1`、`crosscheck.ps1` | 双端构建与校验脚本 |
+| `build.ps1`、`crosscheck.ps1` | 双端构建与校验脚本（含 `-Target headless` 产出零 SDL 依赖二进制） |
+
+### host 变体与 build tag 对称
+
+| 构建 | 编译的 host 文件 | 需要 SDL3 |
+|---|---|---|
+| 默认 | `platform_host.go` + `platform_window.go` + `keymap_window.go` | 是（运行时 purego 动态加载） |
+| `-tags headless` | `platform_host.go` + `platform_headless.go` + `keymap_host.go` | **否** |
+| `linux/mipsle` | 不编译任何 host 文件 | 否 |
+
+窗口与无头变体由互斥的 `!headless` / `headless` tag 二选一，保证 headless 构建零 SDL 依赖。
 
 ---
 
@@ -70,4 +90,5 @@
 - ✅ PC 模拟器：窗口渲染、键鼠事件、交叉编译均通过
 - ✅ 帧解码：与第三方 Python oracle **逐像素一致**（13/13）
 - ✅ 真机产物：`ELF32 / 小端 / EXEC / EM_MIPS`，device 依赖不含 SDL
+- ✅ headless-only 构建（`-tags headless`）：零 SDL 依赖，冒烟导出通过（`build.ps1 -Target headless`）
 - ❌ **未做实机验收**：当前没有实体 C1-Slim 设备，全部结论仅限于模拟器与交叉编译层面
