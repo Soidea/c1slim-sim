@@ -29,12 +29,19 @@
 ```powershell
 cd c1slim-sim
 
+# 新机器（或重新克隆后）先跑一次初始化：启用 pre-commit 钩子 + 体检依赖
+.\setup.ps1
+
 .\build.ps1 -Target sim       # 构建模拟器（并自动把 SDL3.dll 复制到输出目录）
 .\build\sim\demo.exe          # 运行 Demo
 
 .\build.ps1 -Target device    # 交叉编译真机 ELF → build/device/demo
 .\build.ps1 -Target check     # 单元测试 + device 隔离性 + 帧解码交叉校验
 ```
+
+> `setup.ps1` 幂等，可重复运行。它做的两件事**不会随 `git clone` 自动生效**，需每台机器做一次：
+> 启用仓库钩子（`core.hooksPath`，存在 `.git/config` 里），
+> 以及体检 Go / SDL3 / Python 前置依赖。详见「提交前检查」一节。
 
 **两端都不需要 cgo**：SDL3 通过 purego 在运行时动态加载，不参与编译期链接。
 
@@ -362,7 +369,7 @@ go list -deps ./apps/demo | Select-String sdl    # 应无输出
 工作区里遗留的旧问题不会误伤无关提交。它通过 `core.hooksPath` 随仓库分发
 （不是 `.git/hooks/`——那个不入库、不跟着 clone 走），所以每个 clone 都生效。
 
-**新 clone 后若 hook 没生效，手动装一次即可（一次即可，已写入仓库配置则跳过）：**
+**新 clone 后若 hook 没生效，跑一次 `.\setup.ps1` 即可（它会自动执行下面这条并体检依赖）：**
 
 ```powershell
 git config core.hooksPath .githooks
