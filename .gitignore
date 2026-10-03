@@ -7,3 +7,8 @@ third_party/*.dll
 
 # golden 的 PNG 是派生产物（由 .bin 生成），只保留确定性的 .bin
 tests/golden/*.png
+
+# Python 字节码缓存（tools/oracle 等脚本运行生成），不入库
+__pycache__/
+# 跨平台垃圾文件
+.DS_Store
