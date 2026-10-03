@@ -176,6 +176,41 @@ $env:C1SIM_FRAMES='32'; .\build.ps1 -Target seq # 换帧数（上限 64）
 - 脚本用尽后循环。应用是有限状态机时，绕一圈会回到相同画面（第 16 帧里通常有 1～2
   帧与前面重复），这是预期行为——重复帧本身也是有效基线
 
+### 无窗口构建（`-tags headless`，CI 友好）
+
+前面所有无头用法都是**运行时**分流：程序仍按默认方式链接 SDL3，只是靠
+`C1SIM_HEADLESS=1` 在碰 SDL 之前就改走导出路径。所以 `-Target shot/seq/regress`
+**运行时本来就不需要 SDL3**（无头分支从不调用 `sdl.Init`）。
+
+`-tags headless` 则是**编译期**变体：整条 host 代码路径换成不链接 SDL3 的实现，
+产出的二进制**零 SDL 依赖**（不需要 `SDL3.dll`/`.so`，也不涉及 cgo），可放进最小 CI
+镜像或受限沙箱里跑。两种 host 变体由互斥的 build tag 选择：
+
+| 构建 | 编译的 host 文件 | 需要 SDL3 | 用途 |
+|---|---|---|---|
+| 默认 | `platform_host.go` + `platform_window.go` + `keymap_window.go` | 是（运行时 purego 动态加载） | 交互式窗口 |
+| `-tags headless` | `platform_host.go` + `platform_headless.go` + `keymap_host.go` | **否** | CI / 渲染回归 / 无显卡 |
+| `linux/mipsle` | 不编译任何 host 文件 | 否 | 真机（路径不变） |
+
+```powershell
+cd apps/demo
+go build -tags headless -o ../../build/headless/demo-headless.exe .   # 交叉引用 ../../c1device
+
+$env:C1SIM_DUMP='D:\tmp\ui.png'; $env:C1SIM_FRAMES='4'
+..\..\build\headless\demo-headless.exe                            # 无需任何 SDL3 即可导出 4 帧
+```
+
+要点：
+
+- 该构建下**整个程序都是无头的**，不需要（也不看）`C1SIM_HEADLESS`；
+  `C1SIM_DUMP` / `C1SIM_FRAMES` / `C1SIM_FRAME_DELAY` / `C1SIM_TIMEOUT` 照常生效。
+- 可审计地确认"确实没链 SDL"：
+  ```powershell
+  cd c1device; go list -tags headless -deps . | Select-String purego-sdl3   # 应无输出
+  ```
+- 想给 CI 一个"绝不含 SDL"的产物时用 `-tags headless`；只是想在本机导几张图，
+  直接 `-Target shot` 即可，不必加 tag。
+
 ### 双轮逐帧回归（确定性检查）
 
 把帧序列导两遍，逐帧比对像素，验证渲染是**确定性的**（没有随机状态、时间戳、
