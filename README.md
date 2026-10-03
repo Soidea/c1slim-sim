@@ -285,6 +285,15 @@ bit=1 表示黑色，MSB 是该 strip 的最上面一行
 | `bits`（`f[i]=byte(i)`） | 8 个位位置全覆盖 |
 | `random`（固定种子） | 随机压力 |
 
+这些 golden 帧放在 `tests/golden/`：每个用例配一个 `.bin`（5624 字节）与一对 `.png`
+（`<name>.go.png` 由本项目解码器渲染、`<name>.oracle.png` 由 Python oracle 渲染，二者逐像素比对）。
+
+- **`.bin` 是提交的 fixture，不是构建产物**。它由 `tools/genframes/main.go` 用规范打包公式
+  确定性生成，编码了各用例刻意构造的格式边界，代表"正确打包的参考帧"——测试据此验证
+  两端解码一致。改格式意图要增删用例时，手动跑 `tools/genframes` 重新产出 `.bin` 即可，
+  **它不是构建/测试流水线的一环**，测试不依赖它。
+- **`.png` 是派生渲染，已被 `.gitignore` 忽略**，不要提交（两侧压缩级别不同，字节本就不可比）。
+
 ---
 
 ## 为什么 device 构建天然不含 SDL
