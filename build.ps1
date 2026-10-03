@@ -100,6 +100,18 @@ function Build-Sim {
     return $outDir
 }
 
+# Build the SDL-free headless binary (-tags headless). No SDL3.dll is copied:
+# this variant must run without SDL and without cgo (CI / automation friendly).
+function Build-Headless {
+    Remove-Item Env:GOOS, Env:GOARCH, Env:GOMIPS -ErrorAction SilentlyContinue
+    $env:CGO_ENABLED = '0'
+
+    $outDir = Join-Path $root 'build/headless'
+    New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+    Invoke-Go @('build', '-tags', 'headless', '-o', "$outDir/$App.exe", '.') (Join-Path $root "apps/$App")
+    return $outDir
+}
+
 # Run the app headless (no window, no SDL) and dump a frame sequence.
 # $DumpPath is used as a filename prefix when $Frames is greater than 1.
 function Invoke-Headless {
@@ -165,26 +177,26 @@ switch ($Target) {
 
     'shot' {
         Write-Host '==> Headless screenshot (no window)' -ForegroundColor Cyan
-        Build-Sim | Out-Null
+        $outDir = Build-Headless
 
         $shotDir = Join-Path $root 'build/shots'
         New-Item -ItemType Directory -Force -Path $shotDir | Out-Null
         $dump = Join-Path $shotDir "$App.png"
 
-        Invoke-Headless -DumpPath $dump -Frames 1
+        Invoke-Headless -DumpPath $dump -Frames 1 -ExeDir $outDir
         Write-Host "==> Done: $dump" -ForegroundColor Green
     }
 
     'seq' {
         $frames = if ($env:C1SIM_FRAMES) { [int]$env:C1SIM_FRAMES } else { 16 }
         Write-Host "==> Headless frame sequence ($frames frames, no window)" -ForegroundColor Cyan
-        Build-Sim | Out-Null
+        $outDir = Build-Headless
 
         $seqDir = Join-Path $root 'build/shots/seq'
         Remove-Item $seqDir -Recurse -Force -ErrorAction SilentlyContinue
         New-Item -ItemType Directory -Force -Path $seqDir | Out-Null
 
-        Invoke-Headless -DumpPath (Join-Path $seqDir "$App.png") -Frames $frames
+        Invoke-Headless -DumpPath (Join-Path $seqDir "$App.png") -Frames $frames -ExeDir $outDir
         $n = (Get-ChildItem $seqDir -Filter '*.png').Count
         Write-Host "==> Done: $n frames in $seqDir" -ForegroundColor Green
     }
@@ -192,7 +204,7 @@ switch ($Target) {
     'regress' {
         $frames = if ($env:C1SIM_FRAMES) { [int]$env:C1SIM_FRAMES } else { 16 }
         Write-Host "==> Two-round frame regression ($frames frames each, no window)" -ForegroundColor Cyan
-        Build-Sim | Out-Null
+        $outDir = Build-Headless
 
         $regDir = Join-Path $root 'build/shots/regress'
         Remove-Item $regDir -Recurse -Force -ErrorAction SilentlyContinue
@@ -202,7 +214,7 @@ switch ($Target) {
             $dir = Join-Path $regDir $name
             New-Item -ItemType Directory -Force -Path $dir | Out-Null
             Write-Host "--> $name" -ForegroundColor DarkGray
-            Invoke-Headless -DumpPath (Join-Path $dir "$App.png") -Frames $frames
+            Invoke-Headless -DumpPath (Join-Path $dir "$App.png") -Frames $frames -ExeDir $outDir
             $rounds += ,$dir
         }
 
@@ -239,12 +251,7 @@ switch ($Target) {
 
     'headless' {
         Write-Host '==> Building SDL-free headless binary (-tags headless, no SDL3)' -ForegroundColor Cyan
-        Remove-Item Env:GOOS, Env:GOARCH, Env:GOMIPS -ErrorAction SilentlyContinue
-        $env:CGO_ENABLED = '0'
-
-        $outDir = Join-Path $root 'build/headless'
-        New-Item -ItemType Directory -Force -Path $outDir | Out-Null
-        Invoke-Go @('build', '-tags', 'headless', '-o', "$outDir/$App.exe", '.') (Join-Path $root "apps/$App")
+        $outDir = Build-Headless
 
         # No SDL3.dll is copied here on purpose: this variant must run without it.
         # A one-frame export proves the binary is self-contained (no SDL, no cgo).
