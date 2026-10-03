@@ -304,6 +304,36 @@ go list -deps ./apps/demo | Select-String sdl    # 应无输出
 
 ---
 
+## 提交前检查（pre-commit hook）
+
+仓库自带 `.githooks/pre-commit`，只检查**本次暂存（staged）的文件**，
+工作区里遗留的旧问题不会误伤无关提交。它通过 `core.hooksPath` 随仓库分发
+（不是 `.git/hooks/`——那个不入库、不跟着 clone 走），所以每个 clone 都生效。
+
+**新 clone 后若 hook 没生效，手动装一次即可（一次即可，已写入仓库配置则跳过）：**
+
+```powershell
+git config core.hooksPath .githooks
+```
+
+会检查三件事，任一不通过则以**退出码 1** 拦截提交：
+
+| 检查 | 触发条件 | 原因 |
+|---|---|---|
+| `build.ps1` 必须纯 ASCII | 暂存了含非 ASCII 字节的 `*.ps1` | PowerShell 5.1 把无 BOM 的 UTF-8 当 ANSI 读，一个非 ASCII 字节就能破坏引号配对，让整段脚本"伪失败"且报错信息严重偏离根因（详见脚本顶部的自检注释）。`build.ps1` 里也内置了同样的字节级自检作为第二道防线 |
+| 不得提交构建产物 | 暂存了 `*.exe` / `*.dll` / `*.o` / `*.a` / `*.so` 或 `build/*` | 这些是编译/导出输出，应走 `.gitignore`，避免把二进制塞进历史 |
+| Go 文件必须 gofmt 干净 | 暂存了未格式化的 `*.go` | 统一代码风格；找不到 `gofmt` 时跳过该项并提示，不会卡死 |
+
+绕过（确认自己清楚在做什么时）：
+
+```powershell
+git commit -n     # 等价于 --no-verify，跳过所有 hook
+```
+
+> 提示：空提交（没有暂存文件）或合并提交会自动放行，无需绕过。
+
+---
+
 ## 目录
 
 ```
