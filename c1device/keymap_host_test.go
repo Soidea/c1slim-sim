@@ -78,7 +78,7 @@ func TestDeviceCharsetIsSmallerThanHost(t *testing.T) {
 			t.Errorf("mapKey(%d) = %+v,%v; want KeyRune %q", code, got, ok, r)
 		}
 		//同一个字母在模拟器上也必须可得。
-		hgot, hok := scancodeRune(sdl.ScancodeA + sdl.Scancode(r-'a'))
+		hgot, hok := scancodeRune(uint32(sdl.ScancodeA + sdl.Scancode(r-'a')))
 		if !hok || hgot != r {
 			t.Errorf("模拟器应支持字母 %q，得到 %q,%v", r, hgot, hok)
 		}
@@ -91,7 +91,7 @@ func TestDeviceCharsetIsSmallerThanHost(t *testing.T) {
 	}
 	hostOnly := 0
 	for r := rune('a'); r <= 'z'; r++ {
-		if _, ok := scancodeRune(sdl.ScancodeA + sdl.Scancode(r-'a')); ok && !deviceSet[r] {
+		if _, ok := scancodeRune(uint32(sdl.ScancodeA + sdl.Scancode(r-'a'))); ok && !deviceSet[r] {
 			hostOnly++
 		}
 	}
