@@ -2,7 +2,9 @@
 # Safe to re-run: every step is idempotent.
 #
 # Usage (from the repo root):
-#   .\setup.ps1
+#   .\setup.ps1              # full setup: enable hook, add remote, check deps
+#   .\setup.ps1 -CheckOnly   # read-only dependency self-check; non-zero exit if a
+#                            #   blocking dependency is missing (CI / scripts)
 #
 # ASCII only: Windows PowerShell 5.1 reads a BOM-less file as ANSI, so a single
 # non-ASCII byte can break quote pairing and make the whole script unparseable
@@ -12,10 +14,13 @@
 # What it does:
 #   1. Enables the repo pre-commit hook (core.hooksPath -> .githooks). That setting
 #      lives in .git/config, so a fresh clone does NOT inherit it -- run this once
-#      per machine.
+#      per machine. (skipped with -CheckOnly)
 #   2. Adds a read-only remote for the firmware upstream (tracking only).
+#      (skipped with -CheckOnly)
 #   3. Reports whether build prerequisites are present: Go 1.26+, SDL3, and
 #      Python + Pillow + numpy (the last is only needed for -Target check).
+
+param([switch]$CheckOnly)
 
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
@@ -26,32 +31,42 @@ function Ok   { param([string]$m) Write-Host "[ OK ] $m" -ForegroundColor Green 
 function Warn { param([string]$m) Write-Host "[WARN] $m" -ForegroundColor Yellow }
 function Bad  { param([string]$m) Write-Host "[FAIL] $m" -ForegroundColor Red; $script:blocking++ }
 
-Write-Host '==> c1slim-sim machine setup' -ForegroundColor Cyan
+if ($CheckOnly) {
+    Write-Host '==> c1slim-sim dependency check (read-only)' -ForegroundColor Cyan
+}
+else {
+    Write-Host '==> c1slim-sim machine setup' -ForegroundColor Cyan
+}
 
-# --- 1. git + pre-commit hook + upstream remote -------------------------------
+# --- 1. git (+ hook/remote setup unless -CheckOnly) ---------------------------
 $git = Get-Command git -ErrorAction SilentlyContinue
 if (-not $git) {
     Bad 'git not found on PATH'
 }
 else {
     Ok ('git found (' + (& git --version) + ')')
-    Push-Location $root
-    try {
-        & git config core.hooksPath .githooks
-        if ($LASTEXITCODE -ne 0) { Bad 'failed to set core.hooksPath' }
-        else { Ok 'pre-commit hook enabled (core.hooksPath = .githooks)' }
-
-        $remotes = & git remote
-        if ($remotes -contains 'upstream-fw') {
-            Info 'upstream-fw remote already present'
-        }
-        else {
-            & git remote add upstream-fw https://github.com/theBillLee/c1-slim.git
-            if ($LASTEXITCODE -eq 0) { Ok 'added upstream-fw -> theBillLee/c1-slim' }
-            else { Warn 'could not add upstream-fw remote (optional)' }
-        }
+    if ($CheckOnly) {
+        Info 'check-only: not touching git config or remotes'
     }
-    finally { Pop-Location }
+    else {
+        Push-Location $root
+        try {
+            & git config core.hooksPath .githooks
+            if ($LASTEXITCODE -ne 0) { Bad 'failed to set core.hooksPath' }
+            else { Ok 'pre-commit hook enabled (core.hooksPath = .githooks)' }
+
+            $remotes = & git remote
+            if ($remotes -contains 'upstream-fw') {
+                Info 'upstream-fw remote already present'
+            }
+            else {
+                & git remote add upstream-fw https://github.com/theBillLee/c1-slim.git
+                if ($LASTEXITCODE -eq 0) { Ok 'added upstream-fw -> theBillLee/c1-slim' }
+                else { Warn 'could not add upstream-fw remote (optional)' }
+            }
+        }
+        finally { Pop-Location }
+    }
 }
 
 # --- 2. Go 1.26+ --------------------------------------------------------------
@@ -96,10 +111,22 @@ else {
 
 # --- summary ------------------------------------------------------------------
 Write-Host ''
-if ($script:blocking -gt 0) {
-    Write-Host "Setup finished with $script:blocking blocking issue(s) - see [FAIL] above." -ForegroundColor Yellow
+if ($CheckOnly) {
+    if ($script:blocking -gt 0) {
+        Write-Host "Dependency check FAILED: $script:blocking blocking issue(s) - see [FAIL] above." -ForegroundColor Red
+        exit 1
+    }
+    else {
+        Write-Host 'Dependency check passed.' -ForegroundColor Green
+        exit 0
+    }
 }
 else {
-    Write-Host 'Setup complete.' -ForegroundColor Green
-    Write-Host 'Next: .\build.ps1 -Target sim' -ForegroundColor DarkGray
+    if ($script:blocking -gt 0) {
+        Write-Host "Setup finished with $script:blocking blocking issue(s) - see [FAIL] above." -ForegroundColor Yellow
+    }
+    else {
+        Write-Host 'Setup complete.' -ForegroundColor Green
+        Write-Host 'Next: .\build.ps1 -Target sim' -ForegroundColor DarkGray
+    }
 }
