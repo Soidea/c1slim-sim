@@ -4,6 +4,7 @@
 #   .\build.ps1 -Target shot     headless: no window, dump the first frame to PNG
 #   .\build.ps1 -Target seq      headless: dump a numbered frame sequence to build/shots/seq/
 #   .\build.ps1 -Target regress  dump the sequence twice and compare pixel by pixel (CI gate)
+#   .\build.ps1 -Target headless build the SDL-free headless binary (CI; no SDL3 needed)
 #   .\build.ps1 -Target device   cross-compile device ELF (linux/mipsle, static)
 #   .\build.ps1 -Target check    run all tests + verify device side has no SDL
 #
@@ -13,7 +14,7 @@
 #     `!linux || !mipsle`, so they are not compiled at all for linux/mipsle
 #     (see the isolation check in -Target check).
 param(
-    [ValidateSet('sim', 'shot', 'seq', 'regress', 'device', 'check')]
+    [ValidateSet('sim', 'shot', 'seq', 'regress', 'headless', 'device', 'check')]
     [string]$Target = 'sim',
     [string]$App = 'demo'
 )
@@ -102,12 +103,12 @@ function Build-Sim {
 # Run the app headless (no window, no SDL) and dump a frame sequence.
 # $DumpPath is used as a filename prefix when $Frames is greater than 1.
 function Invoke-Headless {
-    param([string]$DumpPath, [int]$Frames)
+    param([string]$DumpPath, [int]$Frames, [string]$ExeDir = (Join-Path $root 'build/sim'))
 
     $env:C1SIM_HEADLESS = '1'
     $env:C1SIM_DUMP = $DumpPath
     $env:C1SIM_FRAMES = "$Frames"
-    Push-Location (Join-Path $root 'build/sim')
+    Push-Location $ExeDir
     try {
         & ".\$App.exe"
         if ($LASTEXITCODE -ne 0) { throw "$App exited with $LASTEXITCODE" }
@@ -234,6 +235,25 @@ switch ($Target) {
         }
         Write-Host "==> Done: $frames/$frames frames identical across both rounds" -ForegroundColor Green
         Write-Host "    artifacts: $regDir" -ForegroundColor DarkGray
+    }
+
+    'headless' {
+        Write-Host '==> Building SDL-free headless binary (-tags headless, no SDL3)' -ForegroundColor Cyan
+        Remove-Item Env:GOOS, Env:GOARCH, Env:GOMIPS -ErrorAction SilentlyContinue
+        $env:CGO_ENABLED = '0'
+
+        $outDir = Join-Path $root 'build/headless'
+        New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+        Invoke-Go @('build', '-tags', 'headless', '-o', "$outDir/$App.exe", '.') (Join-Path $root "apps/$App")
+
+        # No SDL3.dll is copied here on purpose: this variant must run without it.
+        # A one-frame export proves the binary is self-contained (no SDL, no cgo).
+        $smoke = Join-Path $outDir 'smoke.png'
+        Invoke-Headless -DumpPath $smoke -Frames 1 -ExeDir $outDir
+        if (-not (Test-Path $smoke)) { throw 'headless smoke export produced no PNG' }
+
+        Write-Host "==> Done: $outDir/$App.exe (no SDL3.dll required)" -ForegroundColor Green
+        Write-Host "    smoke frame: $smoke" -ForegroundColor DarkGray
     }
 
     'device' {

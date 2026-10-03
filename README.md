@@ -9,6 +9,7 @@
 | 无头单帧 | `.\build.ps1 -Target shot` | `build/shots/demo.png` |
 | 无头帧序列 | `.\build.ps1 -Target seq` | `build/shots/seq/demo_0001.png` …（默认 16 帧） |
 | 双轮回归 | `.\build.ps1 -Target regress` | 导两轮逐帧比对，不一致则退出码 1 |
+| 无窗口构建 | `.\build.ps1 -Target headless` | 零 SDL 依赖的 headless 二进制（CI 用）→ `build/headless/demo.exe` |
 | 无头截图 | `.\build.ps1 -Target shot` | 不弹窗口，导出首帧 PNG → `build/shots/demo.png` |
 | 真机 | `.\build.ps1 -Target device` | `linux/mipsle` 静态 ELF |
 
@@ -193,11 +194,18 @@ $env:C1SIM_FRAMES='32'; .\build.ps1 -Target seq # 换帧数（上限 64）
 | `linux/mipsle` | 不编译任何 host 文件 | 否 | 真机（路径不变） |
 
 ```powershell
-cd apps/demo
-go build -tags headless -o ../../build/headless/demo-headless.exe .   # 交叉引用 ../../c1device
+.\build.ps1 -Target headless        # 构建零 SDL 依赖的 headless 二进制（自带一次冒烟导出）
 
+# 该变体整个程序都是无头的，不需要 C1SIM_HEADLESS；DUMP/FRAMES 照常生效
 $env:C1SIM_DUMP='D:\tmp\ui.png'; $env:C1SIM_FRAMES='4'
-..\..\build\headless\demo-headless.exe                            # 无需任何 SDL3 即可导出 4 帧
+.\build\headless\demo.exe           # 无需任何 SDL3 即可导出 4 帧
+```
+
+也可以直接用 Go（交叉引用 `../../c1device`）：
+
+```powershell
+cd apps/demo
+go build -tags headless -o ../../build/headless/demo-headless.exe .
 ```
 
 要点：
