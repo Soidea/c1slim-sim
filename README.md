@@ -349,6 +349,29 @@ third_party/     SDL3.dll（不入库，由 build.ps1 复制）
 
 ---
 
+## 与官方仓库的关系（对照结论）
+
+本项目是 **C1-Slim 的 PC 模拟器**，它本身是个新工具，但派生自两个上游，必须分清：
+
+| 上游 | 语言/形态 | 与本项目的关系 |
+|---|---|---|
+| `theBillLee/c1-slim` | C 固件/启动器（`src/` + `Makefile`，GPL-3.0，默认分支 `main`） | **只借鉴**它的帧格式（5624 字节 strip-major）与刷新时序（全刷 ~700ms）；该仓 `src/` 下**没有** `c1device` 目录 |
+| `App/c1device` | Go SDK（独立的 App SDK 仓库） | 本项目 `c1device/` 模块的**真正来源**：原样复制其无 tag 文件，再用 build tag 隔离出模拟器后端 |
+
+> 一句话：固件仓给"画什么/怎么刷"的规范，Go SDK 给"怎么写应用"的代码；模拟器把两者搬到 PC 上跑。
+
+**代码边界（已对照核实）**：
+
+- `c1device/` 里无 build tag 的文件（`device.go` / `text.go` / `keymap.go` / `bitmap.go` 及其测试）是**原样复制**，经 grep 确认未被注入 SDL/host 代码（仅 `keymap.go` 多了一句注释）。
+- 真机侧（`//go:build linux && mipsle`）与模拟器侧（`//go:build !linux || !mipsle`）严格隔离；交叉编译 `linux/mipsle` 时模拟器代码根本不参与编译，真机产物与上游一致。
+- 新增的共享文件（`decode.go` 等）无 tag，两端共用。
+
+**`.gitignore` 已与上游对齐**：`build/`、`third_party/*.dll`、`tests/golden/*.png` 覆盖构建产物；并参照固件仓补了 `__pycache__/` 与 `.DS_Store`（Python oracle 运行必生成字节码缓存）。
+
+**可反向贡献回上游的部分**：golden 帧测试向量、帧格式文档、Python 交叉校验 oracle 这些与语言无关、且直接验证固件 5624 字节格式的内容，适合提给 `theBillLee/c1-slim`；而模拟器后端（仅 build-tag 隔离的 host 文件）若要回流，目标应是 `App/c1device`，且需 SDK 维护者同意扩大其使用范围。
+
+---
+
 ## 许可
 
 本项目因改造上游 `App/c1device` 而沿用 **GPL-3.0**，详见 `LICENSE` 与 `NOTICE.md`。
